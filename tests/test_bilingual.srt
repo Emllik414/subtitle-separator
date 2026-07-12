@@ -1,0 +1,24 @@
+1
+00:00:01,000 --> 00:00:04,000
+你好，今天天气真好。
+Hello, the weather is really nice today.
+
+2
+00:00:05,000 --> 00:00:08,500
+我们去公园散步吧。
+Let's go for a walk in the park.
+
+3
+00:00:09,000 --> 00:00:12,000
+我完全同意你的看法。
+I completely agree with you.
+
+4
+00:00:13,000 --> 00:00:16,500
+这部电影非常感人。
+This movie is very touching.
+
+5
+00:00:17,000 --> 00:00:20,000
+明天见！
+See you tomorrow!

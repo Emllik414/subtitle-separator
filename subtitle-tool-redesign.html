@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>双语字幕工具 · 重新设计</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#14161a;
+    --surface:#1b1e24;
+    --surface-2:#21252c;
+    --surface-3:#282d36;
+    --border:#2a2e37;
+    --border-soft:#22262e;
+    --text:#ece9e4;
+    --text-dim:#8a8f9b;
+    --text-faint:#5c616d;
+    --amber:#f0a94e;
+    --amber-soft:rgba(240,169,78,.13);
+    --amber-line:rgba(240,169,78,.35);
+    --cyan:#4fc8c0;
+    --cyan-soft:rgba(79,200,192,.13);
+    --cyan-line:rgba(79,200,192,.35);
+    --success:#6fcf97;
+    --danger:#e5637a;
+    --danger-soft:rgba(229,99,122,.12);
+    --radius:10px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
+    font-family:'Inter',system-ui,-apple-system,sans-serif;font-size:14px;
+    -webkit-font-smoothing:antialiased;}
+  .mono{font-family:'IBM Plex Mono',monospace;}
+  .eyebrow{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.14em;
+    text-transform:uppercase;color:var(--text-faint);font-weight:500;}
+
+  /* ---------- shell ---------- */
+  .shell{display:flex;height:100vh;min-height:640px;overflow:hidden;}
+
+  /* ---------- rail ---------- */
+  .rail{width:84px;flex:none;background:var(--surface);border-right:1px solid var(--border-soft);
+    display:flex;flex-direction:column;align-items:center;padding:18px 0;}
+  .logo{width:36px;height:36px;border-radius:9px;margin-bottom:26px;
+    background:linear-gradient(135deg,var(--amber) 0 50%,var(--cyan) 50% 100%);
+    position:relative;flex:none;}
+  .logo::after{content:"";position:absolute;inset:0;border-radius:9px;
+    background:linear-gradient(135deg,rgba(20,22,26,.15),rgba(20,22,26,.35));}
+  .nav{display:flex;flex-direction:column;gap:6px;width:100%;padding:0 10px;}
+  .nav-btn{display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 4px 9px;
+    border-radius:9px;cursor:pointer;color:var(--text-faint);border:1px solid transparent;
+    user-select:none;transition:background .15s,color .15s;position:relative;}
+  .nav-btn svg{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:1.6;}
+  .nav-btn span{font-size:11px;font-weight:500;letter-spacing:.01em;}
+  .nav-btn:hover{color:var(--text-dim);background:var(--surface-2);}
+  .nav-btn.active{color:var(--text);background:var(--surface-2);border-color:var(--border);}
+  .nav-btn.active::before{content:"";position:absolute;left:-10px;top:8px;bottom:8px;width:3px;
+    border-radius:0 3px 3px 0;background:linear-gradient(var(--amber),var(--cyan));}
+  .rail-spacer{flex:1;}
+  .lang-btn{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;
+    color:var(--text-faint);border:1px solid var(--border-soft);cursor:pointer;}
+  .lang-btn svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.6;}
+  .lang-btn:hover{color:var(--text-dim);border-color:var(--border);}
+
+  /* ---------- workspace ---------- */
+  .workspace{flex:1;display:flex;flex-direction:column;min-width:0;}
+  .wtop{padding:26px 36px 0;}
+  .wtop h1{font-size:20px;font-weight:600;margin:2px 0 4px;letter-spacing:-.01em;}
+  .wtop p{margin:0 0 16px;color:var(--text-dim);font-size:13px;}
+  .sprockets{height:12px;margin:0 36px 22px;border-radius:2px;background-color:var(--border);
+    background-image:radial-gradient(circle,var(--bg) 2.6px,transparent 2.8px);
+    background-size:15px 12px;background-position:6px center;}
+
+  .wbody{flex:1;overflow-y:auto;padding:0 36px 100px;}
+  .view{display:none;}
+  .view.active{display:block;}
+
+  .grid{display:grid;grid-template-columns:1.5fr 1fr;gap:20px;align-items:start;}
+  @media (max-width:920px){.grid{grid-template-columns:1fr;}}
+
+  .card{background:var(--surface);border:1px solid var(--border-soft);border-radius:12px;
+    padding:18px 20px 20px;margin-bottom:20px;}
+  .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+  .card-head .eyebrow{margin:0;}
+
+  /* dropzone */
+  .dropzone{border:1.5px dashed var(--border);border-radius:10px;padding:22px;text-align:center;
+    cursor:pointer;transition:border-color .15s,background .15s;}
+  .dropzone:hover,.dropzone.drag{border-color:var(--amber);background:var(--amber-soft);}
+  .dropzone svg{width:22px;height:22px;stroke:var(--text-faint);fill:none;stroke-width:1.5;margin-bottom:8px;}
+  .dropzone .t1{color:var(--text-dim);font-size:13px;margin:0 0 2px;}
+  .dropzone .t2{color:var(--text-faint);font-size:12px;margin:0;}
+
+  .file-row{display:flex;align-items:center;gap:12px;border:1px solid var(--border);border-radius:10px;
+    padding:12px 14px;}
+  .file-icon{width:34px;height:34px;border-radius:8px;background:var(--surface-3);display:flex;
+    align-items:center;justify-content:center;flex:none;}
+  .file-icon svg{width:16px;height:16px;stroke:var(--text-dim);fill:none;stroke-width:1.6;}
+  .file-meta{flex:1;min-width:0;}
+  .file-name{font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--text);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .file-sub{font-size:12px;color:var(--text-faint);margin-top:2px;}
+  .badge{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:10.5px;font-weight:600;
+    padding:2px 7px;border-radius:5px;background:var(--surface-3);color:var(--text-dim);
+    letter-spacing:.03em;}
+  .icon-btn{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;
+    color:var(--text-faint);cursor:pointer;border:1px solid transparent;flex:none;}
+  .icon-btn:hover{color:var(--text);background:var(--surface-3);}
+  .icon-btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.7;}
+  .dual-bar{height:4px;border-radius:3px;margin-top:12px;
+    background:linear-gradient(90deg,var(--amber) 0 50%,var(--cyan) 50% 100%);opacity:.85;}
+
+  /* preview table */
+  .ptable{width:100%;border-collapse:collapse;}
+  .ptable th{text-align:left;font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--text-faint);
+    text-transform:uppercase;letter-spacing:.08em;font-weight:500;padding:0 10px 8px;}
+  .ptable td{padding:9px 10px;font-size:12.5px;border-top:1px solid var(--border-soft);vertical-align:top;}
+  .ptable tr:first-child td{border-top:none;}
+  .tc{font-family:'IBM Plex Mono',monospace;color:var(--text-faint);font-size:11.5px;white-space:nowrap;}
+  .dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:7px;}
+  .dot.a{background:var(--amber);} .dot.b{background:var(--cyan);}
+  .pfoot{display:flex;justify-content:space-between;align-items:center;margin-top:10px;
+    padding-top:10px;border-top:1px solid var(--border-soft);font-size:12px;color:var(--text-faint);}
+
+  /* toggle */
+  .row{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+  .row:last-child{margin-bottom:0;}
+  .row-label{font-size:13px;color:var(--text);}
+  .row-hint{font-size:11.5px;color:var(--text-faint);margin-top:2px;}
+  .switch{width:36px;height:20px;border-radius:20px;background:var(--surface-3);position:relative;
+    cursor:pointer;border:1px solid var(--border);flex:none;transition:background .15s;}
+  .switch::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;
+    background:var(--text-dim);transition:transform .15s,background .15s;}
+  .switch.on{background:var(--amber-soft);border-color:var(--amber-line);}
+  .switch.on::after{transform:translateX(16px);background:var(--amber);}
+
+  /* lang chips */
+  .chiprow{display:flex;gap:10px;margin-top:2px;}
+  .chip{flex:1;border:1px solid var(--border);border-radius:9px;padding:9px 11px;transition:opacity .15s;}
+  .chip.a{border-color:var(--amber-line);background:var(--amber-soft);}
+  .chip.b{border-color:var(--cyan-line);background:var(--cyan-soft);}
+  .chip.disabled{opacity:.45;}
+  .chip-label{font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.06em;
+    font-family:'IBM Plex Mono',monospace;margin-bottom:4px;}
+  .chip-value{font-size:13px;font-weight:500;display:flex;align-items:center;justify-content:space-between;}
+  .chip-conf{font-size:10.5px;color:var(--text-faint);font-weight:400;}
+
+  /* segmented */
+  .seg{display:inline-flex;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;
+    padding:2px;gap:2px;}
+  .seg button{border:none;background:transparent;color:var(--text-dim);font-size:12px;font-weight:500;
+    padding:6px 12px;border-radius:6px;cursor:pointer;font-family:inherit;}
+  .seg button.active{background:var(--surface-3);color:var(--text);}
+  .seg-full{display:flex;}
+  .seg-full button{flex:1;text-align:center;}
+
+  .field-label{font-size:12px;color:var(--text-dim);margin:0 0 6px;font-weight:500;}
+  .stepper{display:flex;align-items:center;gap:8px;background:var(--surface-2);border:1px solid var(--border);
+    border-radius:8px;padding:4px;width:fit-content;}
+  .stepper button{width:24px;height:24px;border-radius:6px;border:none;background:transparent;
+    color:var(--text-dim);cursor:pointer;font-size:15px;}
+  .stepper button:hover{background:var(--surface-3);color:var(--text);}
+  .stepper .val{font-family:'IBM Plex Mono',monospace;font-size:12.5px;min-width:56px;text-align:center;}
+
+  .outrow{display:flex;align-items:center;gap:10px;border:1px solid var(--border);border-radius:9px;
+    padding:8px 8px 8px 12px;margin-top:8px;}
+  .outrow.a{border-left:3px solid var(--amber);} .outrow.b{border-left:3px solid var(--cyan);}
+  .outrow input{flex:1;background:none;border:none;color:var(--text);font-family:'IBM Plex Mono',monospace;
+    font-size:12px;outline:none;}
+  .outrow input::placeholder{color:var(--text-faint);font-family:'Inter',sans-serif;}
+
+  .warn{display:flex;align-items:center;gap:8px;background:var(--danger-soft);border:1px solid rgba(229,99,122,.3);
+    border-radius:8px;padding:8px 12px;font-size:12px;color:#f0a3b1;margin-top:12px;}
+  .warn svg{width:14px;height:14px;stroke:var(--danger);fill:none;stroke-width:1.8;flex:none;}
+
+  .pair{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  @media (max-width:700px){.pair{grid-template-columns:1fr;}}
+  .pair-head{display:flex;align-items:center;gap:8px;margin-bottom:10px;}
+  .pair-head .swatch{width:8px;height:8px;border-radius:50%;}
+  .pair-head span{font-size:12px;color:var(--text-dim);font-weight:500;}
+  .track-a .swatch{background:var(--amber);} .track-b .swatch{background:var(--cyan);}
+  .track-a .dropzone.filled,.track-a .file-row{border-color:var(--amber-line);}
+  .track-b .dropzone.filled,.track-b .file-row{border-color:var(--cyan-line);}
+
+  .queue-row{display:flex;align-items:center;gap:12px;padding:11px 4px;border-top:1px solid var(--border-soft);}
+  .queue-row:first-child{border-top:none;}
+  .flowbadges{display:flex;align-items:center;gap:8px;flex:none;}
+  .flowbadges svg{width:13px;height:13px;stroke:var(--text-faint);fill:none;stroke-width:2;}
+
+  /* action bar */
+  .actionbar{position:sticky;bottom:0;left:0;right:0;background:var(--surface);
+    border-top:1px solid var(--border-soft);padding:14px 36px;display:flex;align-items:center;
+    justify-content:space-between;}
+  .status{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-faint);}
+  .status svg{width:14px;height:14px;stroke:var(--success);fill:none;stroke-width:2;}
+  .btn-primary{background:linear-gradient(90deg,var(--amber),#e59a3c);border:none;color:#231705;
+    font-weight:600;font-size:13px;padding:11px 22px;border-radius:9px;cursor:pointer;
+    display:flex;align-items:center;gap:8px;font-family:inherit;}
+  .btn-primary svg{width:15px;height:15px;stroke:#231705;fill:none;stroke-width:2;}
+  .btn-primary:hover{filter:brightness(1.06);}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ================= RAIL ================= -->
+  <nav class="rail">
+    <div class="logo"></div>
+    <div class="nav">
+      <div class="nav-btn active" data-view="split">
+        <svg viewBox="0 0 24 24"><path d="M12 12L4 4"/><path d="M4 4h5"/><path d="M4 4v5"/><path d="M12 12l8-8"/><path d="M20 4h-5"/><path d="M20 4v5"/></svg>
+        <span>分离</span>
+      </div>
+      <div class="nav-btn" data-view="merge">
+        <svg viewBox="0 0 24 24"><path d="M4 4l7 7"/><path d="M4 9V4h5"/><path d="M20 4l-7 7"/><path d="M15 4h5v5"/></svg>
+        <span>合并</span>
+      </div>
+      <div class="nav-btn" data-view="convert">
+        <svg viewBox="0 0 24 24"><path d="M7 8h11l-3-3"/><path d="M17 16H6l3 3"/></svg>
+        <span>转换</span>
+      </div>
+    </div>
+    <div class="rail-spacer"></div>
+    <div class="lang-btn" title="界面语言">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/></svg>
+    </div>
+  </nav>
+
+  <!-- ================= WORKSPACE ================= -->
+  <main class="workspace">
+
+    <div class="wtop">
+      <div class="eyebrow" id="hdr-eyebrow">SPLIT</div>
+      <h1 id="hdr-title">分离双语字幕</h1>
+      <p id="hdr-desc">拆分为两个独立的单语言字幕文件，逐条比对预览后再导出。</p>
+    </div>
+    <div class="sprockets"></div>
+
+    <div class="wbody">
+
+      <!-- ---------------- VIEW: SPLIT ---------------- -->
+      <section class="view active" id="view-split">
+        <div class="grid">
+          <div>
+            <div class="card">
+              <div class="card-head"><span class="eyebrow">源文件</span></div>
+              <div class="file-row" style="margin-bottom:12px;">
+                <div class="file-icon">
+                  <svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/><path d="M14 3v6h6"/></svg>
+                </div>
+                <div class="file-meta">
+                  <div class="file-name">Inception.2010.zh-en.srt</div>
+                  <div class="file-sub">1,842 条字幕 · 双语已识别</div>
+                </div>
+                <span class="badge">SRT</span>
+                <div class="icon-btn"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></div>
+              </div>
+              <div class="dual-bar"></div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <span class="eyebrow">预览</span>
+                <span style="font-size:11.5px;color:var(--text-faint);">前 3 条 / 共 1,842 条</span>
+              </div>
+              <table class="ptable">
+                <tr><th style="width:150px;">时间码</th><th><span class="dot a"></span>语言一</th><th><span class="dot b"></span>语言二</th></tr>
+                <tr><td class="tc">00:00:12,340</td><td>Hello, how are you today?</td><td>你好，你今天怎么样？</td></tr>
+                <tr><td class="tc">00:00:15,400</td><td>I'm doing great, thanks.</td><td>我很好，谢谢。</td></tr>
+                <tr><td class="tc">00:00:19,100</td><td>Let's get started then.</td><td>那我们开始吧。</td></tr>
+              </table>
+              <div class="pfoot"><span>字符编码 UTF-8</span><span>帧率无关</span></div>
+            </div>
+          </div>
+
+          <div>
+            <div class="card">
+              <div class="card-head"><span class="eyebrow">分离选项</span></div>
+              <div class="row">
+                <div>
+                  <div class="row-label">自动检测语言分配</div>
+                  <div class="row-hint">按字符集与语法特征自动判定每行语言</div>
+                </div>
+                <div class="switch on" id="autodetect"></div>
+              </div>
+              <div class="chiprow" id="langchips">
+                <div class="chip a">
+                  <div class="chip-label">语言一 · 第1行</div>
+                  <div class="chip-value">English <span class="chip-conf">98%</span></div>
+                </div>
+                <div class="chip b">
+                  <div class="chip-label">语言二 · 第2行</div>
+                  <div class="chip-value">中文 <span class="chip-conf">96%</span></div>
+                </div>
+              </div>
+              <div style="margin-top:16px;">
+                <div class="field-label">输出格式</div>
+                <div class="seg seg-full">
+                  <button class="active">与源相同</button><button>SRT</button><button>ASS</button><button>VTT</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head"><span class="eyebrow">输出路径</span></div>
+              <div class="field-label">语言一</div>
+              <div class="outrow a">
+                <input type="text" value="~/Movies/Inception.2010.en.srt">
+                <div class="icon-btn"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg></div>
+              </div>
+              <div class="field-label" style="margin-top:12px;">语言二</div>
+              <div class="outrow b">
+                <input type="text" value="~/Movies/Inception.2010.zh.srt">
+                <div class="icon-btn"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------- VIEW: MERGE ---------------- -->
+      <section class="view" id="view-merge">
+        <div class="card">
+          <div class="pair">
+            <div class="track-a">
+              <div class="pair-head"><span class="swatch"></span><span>主文件 · Track A</span></div>
+              <div class="file-row">
+                <div class="file-icon"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/><path d="M14 3v6h6"/></svg></div>
+                <div class="file-meta"><div class="file-name">Movie.en.srt</div><div class="file-sub">856 条字幕</div></div>
+                <span class="badge">SRT</span>
+              </div>
+            </div>
+            <div class="track-b">
+              <div class="pair-head"><span class="swatch"></span><span>副文件 · Track B</span></div>
+              <div class="file-row">
+                <div class="file-icon"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/><path d="M14 3v6h6"/></svg></div>
+                <div class="file-meta"><div class="file-name">Movie.zh.srt</div><div class="file-sub">861 条字幕</div></div>
+                <span class="badge">SRT</span>
+              </div>
+            </div>
+          </div>
+          <div class="warn">
+            <svg viewBox="0 0 24 24"><path d="M12 3l9 16H3z"/><path d="M12 9v5"/><circle cx="12" cy="16.3" r=".6" fill="currentColor" stroke="none"/></svg>
+            条目数不一致：856 条 / 861 条 — 已按下方规则处理
+          </div>
+        </div>
+
+        <div class="grid">
+          <div class="card">
+            <div class="card-head"><span class="eyebrow">合并选项</span></div>
+            <div class="field-label">时间戳来源</div>
+            <div class="seg" style="margin-bottom:14px;"><button class="active">主文件</button><button>副文件</button></div>
+
+            <div class="field-label">时间戳容差</div>
+            <div class="stepper" style="margin-bottom:14px;">
+              <button>−</button><span class="val mono">100 ms</span><button>+</button>
+            </div>
+
+            <div class="field-label">语言排序</div>
+            <div class="seg" style="margin-bottom:14px;"><button class="active">主文件在上</button><button>副文件在上</button></div>
+
+            <div class="field-label">条目数不一致时</div>
+            <div class="seg"><button>空条目填充</button><button class="active">截断到较短文件</button></div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><span class="eyebrow">输出</span></div>
+            <div class="field-label">保留头部来源</div>
+            <div class="seg seg-full" style="margin-bottom:14px;"><button class="active">主文件</button><button>副文件</button></div>
+            <div class="field-label">输出格式</div>
+            <div class="seg seg-full" style="margin-bottom:14px;"><button class="active">与主文件相同</button><button>SRT</button><button>ASS</button></div>
+            <div class="field-label">输出路径</div>
+            <div class="outrow">
+              <input type="text" value="~/Movies/Movie.bilingual.srt">
+              <div class="icon-btn"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------- VIEW: CONVERT ---------------- -->
+      <section class="view" id="view-convert">
+        <div class="card">
+          <div class="card-head"><span class="eyebrow">目标格式</span></div>
+          <div class="seg seg-full"><button>SRT</button><button class="active">ASS</button><button>SSA</button><button>VTT</button></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <span class="eyebrow">批量队列</span>
+            <span style="font-size:11.5px;color:var(--text-faint);">3 个文件</span>
+          </div>
+          <div class="queue-row">
+            <div class="file-icon"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/><path d="M14 3v6h6"/></svg></div>
+            <div class="file-meta"><div class="file-name">Episode01.ass</div></div>
+            <div class="flowbadges"><span class="badge">ASS</span><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span class="badge">SRT</span></div>
+            <div class="icon-btn"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></div>
+          </div>
+          <div class="queue-row">
+            <div class="file-icon"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/><path d="M14 3v6h6"/></svg></div>
+            <div class="file-meta"><div class="file-name">Episode02.ass</div></div>
+            <div class="flowbadges"><span class="badge">ASS</span><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span class="badge">SRT</span></div>
+            <div class="icon-btn"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></div>
+          </div>
+          <div class="queue-row">
+            <div class="file-icon"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/><path d="M14 3v6h6"/></svg></div>
+            <div class="file-meta"><div class="file-name">Episode03.vtt</div></div>
+            <div class="flowbadges"><span class="badge">VTT</span><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span class="badge">SRT</span></div>
+            <div class="icon-btn"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></div>
+          </div>
+          <div class="dropzone" style="margin-top:14px;padding:14px;">
+            <div class="t1" style="margin:0;">拖放更多字幕文件以加入队列</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="eyebrow">输出路径</span></div>
+          <div class="seg" style="margin-bottom:12px;"><button class="active">原文件夹</button><button>自定义</button></div>
+          <div class="outrow"><input type="text" value="每个文件保存到其原始所在目录" disabled></div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- ================= ACTION BAR ================= -->
+    <div class="actionbar">
+      <div class="status">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/></svg>
+        <span id="status-text">就绪 · 已加载 1 个文件</span>
+      </div>
+      <button class="btn-primary" id="mainAction">
+        <span id="mainActionText">开始分离</span>
+        <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </button>
+    </div>
+
+  </main>
+</div>
+
+<script>
+  const headers = {
+    split:   {eyebrow:'SPLIT',   title:'分离双语字幕', desc:'拆分为两个独立的单语言字幕文件，逐条比对预览后再导出。', status:'就绪 · 已加载 1 个文件', action:'开始分离'},
+    merge:   {eyebrow:'MERGE',   title:'合并双语字幕', desc:'将两个单语言字幕文件按时间轴对齐合并为一个双语文件。', status:'就绪 · 已加载 2 个文件', action:'开始合并'},
+    convert: {eyebrow:'CONVERT', title:'字幕格式转换', desc:'在 SRT、ASS、SSA、VTT 之间批量转换，保留样式与时间轴。', status:'就绪 · 队列中 3 个文件', action:'开始转换'}
+  };
+
+  document.querySelectorAll('.nav-btn').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      const key = btn.dataset.view;
+      document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+      document.getElementById('view-'+key).classList.add('active');
+      const h = headers[key];
+      document.getElementById('hdr-eyebrow').textContent = h.eyebrow;
+      document.getElementById('hdr-title').textContent = h.title;
+      document.getElementById('hdr-desc').textContent = h.desc;
+      document.getElementById('status-text').textContent = h.status;
+      document.getElementById('mainActionText').textContent = h.action;
+    });
+  });
+
+  document.getElementById('autodetect').addEventListener('click',function(){
+    this.classList.toggle('on');
+    document.getElementById('langchips').querySelectorAll('.chip').forEach(c=>c.classList.toggle('disabled'));
+  });
+
+  document.querySelectorAll('.seg').forEach(seg=>{
+    seg.querySelectorAll('button').forEach(b=>{
+      b.addEventListener('click',()=>{
+        seg.querySelectorAll('button').forEach(x=>x.classList.remove('active'));
+        b.classList.add('active');
+      });
+    });
+  });
+
+  document.querySelectorAll('.dropzone').forEach(z=>{
+    ['dragenter','dragover'].forEach(ev=>z.addEventListener(ev,e=>{e.preventDefault();z.classList.add('drag');}));
+    ['dragleave','drop'].forEach(ev=>z.addEventListener(ev,e=>{e.preventDefault();z.classList.remove('drag');}));
+  });
+</script>
+</body>
+</html>
