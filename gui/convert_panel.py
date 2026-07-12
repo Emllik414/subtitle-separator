@@ -1,24 +1,29 @@
-"""Format Convert Panel ? third tab of the main window.
-
-Allows the user to convert subtitle files between SRT, ASS, SSA, and VTT
-formats. Reuses existing parser infrastructure and DropZone widget.
-"""
+from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton,
-    QFileDialog, QFrame,
-)
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from gui.drop_zone import DropZone
 from gui.i18n import i18n, tr
+from gui.ui_components import Card, StatusPill
+from logic.converter import convert_subtitle
 from models.enums import SubtitleFormat
 from parsers.base import detect_format, get_parser
-from logic.converter import convert_subtitle
 from utils.text import read_subtitle_file
 
 
@@ -27,317 +32,338 @@ class FormatConvertPanel(QWidget):
 
     def __init__(self):
         super().__init__()
-        self._source_format = None
+        self._source_format: SubtitleFormat | None = None
         self._source_path = ""
         self._entry_count = 0
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-
-        # Description card
-        desc_card = QFrame()
-        desc_card.setObjectName("desc_card")
-        desc_card.setStyleSheet(
-            "QFrame#desc_card {"
-            "  background-color: #252836;"
-            "  border: 1px solid #363a4f;"
-            "  border-radius: 10px;"
-            "  padding: 14px 18px;"
-            "}"
-        )
-        desc_layout = QVBoxLayout(desc_card)
-        desc_layout.setContentsMargins(18, 14, 18, 14)
-        desc_layout.setSpacing(4)
-
-        self.title_label = QLabel(tr("@convert.title"))
-        self.title_label.setStyleSheet(
-            "font-size: 20px; font-weight: bold; color: #cdd6f4;"
-            "background: transparent; border: none;"
-        )
-        desc_layout.addWidget(self.title_label)
-
-        self.desc_label = QLabel(tr("@convert.description"))
-        self.desc_label.setStyleSheet(
-            "font-size: 13px; color: #6c7086;"
-            "background: transparent; border: none;"
-        )
-        desc_layout.addWidget(self.desc_label)
-
-        layout.addWidget(desc_card)
-
-        # Drop zone
-        self.drop_zone = DropZone("@convert.drop_label")
-        self.drop_zone.file_changed.connect(self._on_file_loaded)
-        layout.addWidget(self.drop_zone)
-
-        # Source format info
-        info_row = QHBoxLayout()
-        info_row.setSpacing(8)
-
-        self.source_format_label = QLabel(tr("@convert.source_format"))
-        self.source_format_label.setStyleSheet("color: #a6adc8; font-size: 13px;")
-        info_row.addWidget(self.source_format_label)
-
-        self.format_value_label = QLabel("--")
-        self.format_value_label.setStyleSheet(
-            "color: #585b70; font-size: 13px; font-weight: bold;"
-        )
-        info_row.addWidget(self.format_value_label)
-
-        info_row.addStretch()
-        layout.addLayout(info_row)
-
-        # Settings card
-        settings_card = QFrame()
-        settings_card.setObjectName("settings_card")
-        settings_card.setStyleSheet(
-            "QFrame#settings_card {"
-            "  background-color: #252836;"
-            "  border: 1px solid #363a4f;"
-            "  border-radius: 10px;"
-            "  padding: 14px 18px;"
-            "}"
-        )
-        settings_layout = QVBoxLayout(settings_card)
-        settings_layout.setSpacing(10)
-
-        # Target format
-        target_row = QHBoxLayout()
-        target_row.setSpacing(8)
-
-        self.target_label = QLabel(tr("@convert.target_format"))
-        self.target_label.setStyleSheet("color: #a6adc8; font-size: 13px;")
-        target_row.addWidget(self.target_label)
-
-        self.format_combo = QComboBox()
-        self.format_combo.addItems(["SRT", "ASS", "SSA", "VTT"])
-        self.format_combo.setMinimumWidth(160)
-        self.format_combo.currentIndexChanged.connect(self._on_target_format_changed)
-        target_row.addWidget(self.format_combo)
-
-        target_row.addStretch()
-        settings_layout.addLayout(target_row)
-
-        # Output path
-        output_row = QHBoxLayout()
-        output_row.setSpacing(8)
-
-        self.output_label = QLabel(tr("@convert.output_path"))
-        self.output_label.setStyleSheet("color: #a6adc8; font-size: 13px;")
-        output_row.addWidget(self.output_label)
-
-        self.output_path_label = QLabel(tr("@convert.auto_output"))
-        self.output_path_label.setStyleSheet(
-            "color: #a6adc8; font-size: 12px; padding: 4px 0;"
-        )
-        output_row.addWidget(self.output_path_label, 1)
-
-        self.output_browse_btn = QPushButton(tr("@convert.choose_output"))
-        self.output_browse_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; color: #89b4fa;"
-            "  border: 1px solid #89b4fa; padding: 6px 16px;"
-            "  border-radius: 6px; font-size: 13px; }"
-            "QPushButton:hover { background-color: #313244; }"
-        )
-        self.output_browse_btn.clicked.connect(self._browse_output)
-        output_row.addWidget(self.output_browse_btn)
-
-        settings_layout.addLayout(output_row)
-        layout.addWidget(settings_card)
-
-        # Status
-        self.status_label = QLabel(tr("@convert.status.idle"))
-        self.status_label.setObjectName("convert_status")
-        self.status_label.setWordWrap(True)
-        self._set_status_style("idle")
-        layout.addWidget(self.status_label)
-
-        # Action buttons
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(10)
-
-        self.convert_btn = QPushButton(tr("@convert.start"))
-        self.convert_btn.setFixedWidth(150)
-        self.convert_btn.setEnabled(False)
-        self.convert_btn.clicked.connect(self._on_convert)
-        btn_row.addWidget(self.convert_btn)
-
-        self.open_folder_btn = QPushButton(tr("@convert.open_output_folder"))
-        self.open_folder_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; color: #89b4fa;"
-            "  border: 1px solid #89b4fa; padding: 6px 16px;"
-            "  border-radius: 6px; font-size: 13px; }"
-            "QPushButton:hover { background-color: #313244; }"
-        )
-        self.open_folder_btn.setEnabled(False)
-        self.open_folder_btn.clicked.connect(self._open_output_folder)
-        btn_row.addWidget(self.open_folder_btn)
-
-        btn_row.addStretch()
-
-        self.clear_btn = QPushButton(tr("@convert.clear"))
-        self.clear_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; color: #f38ba8;"
-            "  border: 1px solid #585b70; padding: 6px 16px;"
-            "  border-radius: 6px; font-size: 13px; }"
-            "QPushButton:hover { background-color: #313244; border-color: #f38ba8; }"
-        )
-        self.clear_btn.clicked.connect(self._on_clear)
-        btn_row.addWidget(self.clear_btn)
-
-        layout.addLayout(btn_row)
-        layout.addStretch()
-
         self._custom_output_path = ""
         self._last_output_path = ""
 
-        i18n.language_changed.connect(self._on_language_changed)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(16)
 
-    def _on_language_changed(self, lang):
-        self.title_label.setText(tr("@convert.title"))
-        self.desc_label.setText(tr("@convert.description"))
-        self.target_label.setText(tr("@convert.target_format"))
-        self.output_label.setText(tr("@convert.output_path"))
-        self.convert_btn.setText(tr("@convert.start"))
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(14)
+        left_layout.addWidget(self._build_hero_card())
+        left_layout.addWidget(self._build_import_card(), 1)
+        root.addWidget(left, 11)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(14)
+        right_layout.addWidget(self._build_settings_card())
+        right_layout.addStretch()
+        right_layout.addWidget(self._build_actions_card())
+        root.addWidget(right, 9)
+
+        i18n.language_changed.connect(self._on_language_changed)
+        self._on_language_changed(i18n.current_lang)
+
+    def _build_hero_card(self) -> Card:
+        card = Card()
+        card.setObjectName("hero_card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(26, 22, 26, 22)
+        layout.setSpacing(5)
+
+        self.eyebrow = QLabel("FORMAT CONVERTER")
+        self.eyebrow.setObjectName("eyebrow")
+        self.hero_title = QLabel()
+        self.hero_title.setObjectName("hero_title")
+        self.hero_desc = QLabel()
+        self.hero_desc.setObjectName("hero_description")
+        self.hero_desc.setWordWrap(True)
+        layout.addWidget(self.eyebrow)
+        layout.addWidget(self.hero_title)
+        layout.addWidget(self.hero_desc)
+
+        flow = QHBoxLayout()
+        flow.setContentsMargins(0, 12, 0, 0)
+        flow.setSpacing(9)
+        self.source_tag = QLabel("SRT")
+        self.source_tag.setObjectName("format_tag")
+        self.source_tag.setAlignment(Qt.AlignCenter)
+        arrow = QLabel("→")
+        arrow.setObjectName("format_arrow")
+        arrow.setAlignment(Qt.AlignCenter)
+        self.target_tag = QLabel("ASS")
+        self.target_tag.setObjectName("format_tag")
+        self.target_tag.setProperty("target", True)
+        self.target_tag.setAlignment(Qt.AlignCenter)
+        flow.addWidget(self.source_tag)
+        flow.addWidget(arrow)
+        flow.addWidget(self.target_tag)
+        flow.addStretch()
+        layout.addLayout(flow)
+        return card
+
+    def _build_import_card(self) -> Card:
+        card = Card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(17, 16, 17, 16)
+        layout.setSpacing(12)
+        self.import_title = QLabel()
+        self.import_title.setObjectName("card_title")
+        layout.addWidget(self.import_title)
+        self.drop_zone = DropZone(
+            "@convert.preview_drop_main",
+            badge_text="SRT",
+            replace_content_on_load=True,
+        )
+        self.drop_zone.setMinimumHeight(190)
+        self.drop_zone.file_changed.connect(self._on_file_loaded)
+        layout.addWidget(self.drop_zone, 1)
+        return card
+
+    def _build_settings_card(self) -> Card:
+        card = Card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(17, 16, 17, 16)
+        layout.setSpacing(0)
+        self.settings_title = QLabel()
+        self.settings_title.setObjectName("card_title")
+        layout.addWidget(self.settings_title)
+        layout.addSpacing(7)
+
+        source_row, self.source_key, self.source_sub, source_right = self._make_settings_row()
+        self.source_value = QLabel("--")
+        self.source_value.setObjectName("settings_value")
+        self.source_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        source_right.addWidget(self.source_value)
+        layout.addWidget(source_row)
+
+        target_row, self.target_key, self.target_sub, target_right = self._make_settings_row()
+        self.format_combo = QComboBox()
+        self.format_combo.setObjectName("format_combo")
+        self.format_combo.addItems(["SRT", "ASS", "SSA", "VTT"])
+        self.format_combo.setCurrentText("ASS")
+        self.format_combo.currentIndexChanged.connect(self._on_target_format_changed)
+        target_right.addWidget(self.format_combo)
+        layout.addWidget(target_row)
+
+        output_row, self.output_key, self.output_sub, output_right = self._make_settings_row()
+        self.output_browse_btn = QPushButton()
+        self.output_browse_btn.setObjectName("secondary_button")
+        self.output_browse_btn.setCursor(Qt.PointingHandCursor)
+        self.output_browse_btn.clicked.connect(self._browse_output)
+        output_right.addWidget(self.output_browse_btn)
+        layout.addWidget(output_row)
+
+        name_row, self.name_key, self.output_name_label, name_right = self._make_settings_row()
+        self.output_name_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.ready_pill = StatusPill(tone="neutral")
+        name_right.addWidget(self.ready_pill)
+        layout.addWidget(name_row)
+        return card
+
+    def _make_settings_row(self):
+        row = QFrame()
+        row.setObjectName("settings_row")
+        row.setMinimumHeight(67)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 8, 0, 8)
+        layout.setSpacing(14)
+        left = QVBoxLayout()
+        left.setSpacing(3)
+        key = QLabel()
+        key.setObjectName("settings_key")
+        sub = QLabel()
+        sub.setObjectName("card_subtitle")
+        sub.setWordWrap(True)
+        left.addWidget(key)
+        left.addWidget(sub)
+        layout.addLayout(left, 1)
+        right = QHBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(8)
+        layout.addLayout(right)
+        return row, key, sub, right
+
+    def _build_actions_card(self) -> Card:
+        card = Card()
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(16, 13, 16, 13)
+        layout.setSpacing(9)
+        self.clear_btn = QPushButton()
+        self.clear_btn.setObjectName("danger_button")
+        self.clear_btn.setCursor(Qt.PointingHandCursor)
+        self.clear_btn.clicked.connect(self._on_clear)
+        layout.addWidget(self.clear_btn)
+        layout.addStretch()
+        self.open_folder_btn = QPushButton()
+        self.open_folder_btn.setObjectName("secondary_button")
+        self.open_folder_btn.setCursor(Qt.PointingHandCursor)
+        self.open_folder_btn.setEnabled(False)
+        self.open_folder_btn.clicked.connect(self._open_output_folder)
+        layout.addWidget(self.open_folder_btn)
+        self.convert_btn = QPushButton()
+        self.convert_btn.setObjectName("primary_button")
+        self.convert_btn.setCursor(Qt.PointingHandCursor)
+        self.convert_btn.setEnabled(False)
+        self.convert_btn.clicked.connect(self._on_convert)
+        layout.addWidget(self.convert_btn)
+        return card
+
+    def _on_language_changed(self, _lang: str) -> None:
+        self.hero_title.setText(tr("@convert.preview_hero_title"))
+        self.hero_desc.setText(tr("@convert.preview_hero_desc"))
+        self.import_title.setText(tr("@convert.preview_import_title"))
+        self.settings_title.setText(tr("@convert.preview_settings_title"))
+        self.source_key.setText(tr("@convert.preview_source_format"))
+        self.source_sub.setText(tr("@convert.preview_auto_detect"))
+        self.target_key.setText(tr("@convert.preview_target_format"))
+        self.target_sub.setText(tr("@convert.preview_target_desc"))
+        self.output_key.setText(tr("@convert.preview_output_location"))
+        self.output_sub.setText(tr("@convert.preview_output_default"))
+        self.name_key.setText(tr("@convert.preview_output_name"))
+        self.output_browse_btn.setText(tr("@convert.preview_choose_location"))
         self.clear_btn.setText(tr("@convert.clear"))
         self.open_folder_btn.setText(tr("@convert.open_output_folder"))
-        self.output_browse_btn.setText(tr("@convert.choose_output"))
-        self.source_format_label.setText(tr("@convert.source_format"))
-        if not self._source_path:
-            self._set_status_text("idle")
-        else:
-            self._set_status_text("detected")
+        self.convert_btn.setText(tr("@convert.start"))
+        self._refresh_state()
 
-    def _on_file_loaded(self, path):
+    def _on_file_loaded(self, path: str) -> None:
         self._source_path = path
         self._custom_output_path = ""
         self._last_output_path = ""
         self.open_folder_btn.setEnabled(False)
         try:
-            raw_text, _enc, _nl = read_subtitle_file(path)
+            raw_text, encoding, _newline = read_subtitle_file(path)
             self._source_format = detect_format(raw_text)
-            parser_cls = get_parser(self._source_format)
-            sub_file = parser_cls.parse(raw_text)
-            self._entry_count = len(sub_file.entries)
-
-            self.format_value_label.setText(self._source_format.name)
-            self.format_value_label.setStyleSheet(
-                "color: #a6e3a1; font-size: 13px; font-weight: bold;"
+            parser = get_parser(self._source_format)
+            subtitle = parser.parse(raw_text)
+            self._entry_count = len(subtitle.entries)
+            self.drop_zone.set_loaded_metadata(
+                path,
+                self._source_format.name,
+                tr(
+                    "@convert.preview_loaded_meta",
+                    fmt=self._source_format.name,
+                    count=self._entry_count,
+                    encoding=encoding.upper(),
+                ),
             )
             self.convert_btn.setEnabled(True)
-            self._set_status_text("detected")
             self._update_output_path()
-        except Exception as e:
+            self._refresh_state()
+            self.status_message.emit(tr("@convert.status.detected", fmt=self._source_format.name, count=self._entry_count))
+        except Exception as exc:
             self._source_format = None
             self._entry_count = 0
-            self.format_value_label.setText("?")
-            self.format_value_label.setStyleSheet(
-                "color: #f38ba8; font-size: 13px; font-weight: bold;"
-            )
             self.convert_btn.setEnabled(False)
-            self._set_status_text("failed", msg=str(e))
+            self.ready_pill.setText(tr("@convert.preview_failed"))
+            self.ready_pill.set_tone("danger")
+            QMessageBox.warning(self, tr("@convert.preview_load_failed"), tr("@error.load", msg=str(exc)))
 
-    def _update_output_path(self):
+    def _on_target_format_changed(self, _index: int) -> None:
+        self.target_tag.setText(self.format_combo.currentText())
+        self._update_output_path()
+        self._refresh_state()
+
+    def _update_output_path(self) -> None:
         if not self._source_path:
-            self.output_path_label.setText(tr("@convert.auto_output"))
+            self.output_name_label.setText(tr("@convert.preview_no_output"))
             return
         if self._custom_output_path:
-            self.output_path_label.setText(self._custom_output_path)
-            return
+            output_path = self._custom_output_path
+        else:
+            src = Path(self._source_path)
+            ext_map = {"SRT": ".srt", "ASS": ".ass", "SSA": ".ssa", "VTT": ".vtt"}
+            ext = ext_map.get(self.format_combo.currentText(), ".srt")
+            output_path = str(src.parent / f"{src.stem}_converted{ext}")
+        self.output_name_label.setText(os.path.basename(output_path))
+        self.output_name_label.setToolTip(output_path)
+
+    def _resolved_output_path(self) -> str:
+        if self._custom_output_path:
+            return self._custom_output_path
+        if not self._source_path:
+            return ""
         src = Path(self._source_path)
         ext_map = {"SRT": ".srt", "ASS": ".ass", "SSA": ".ssa", "VTT": ".vtt"}
-        target_ext = ext_map.get(self.format_combo.currentText(), ".srt")
-        name = f"{src.stem}_converted{target_ext}"
-        self.output_path_label.setText(str(src.parent / name))
+        ext = ext_map.get(self.format_combo.currentText(), ".srt")
+        return str(src.parent / f"{src.stem}_converted{ext}")
 
-    def _on_target_format_changed(self, idx):
-        self._update_output_path()
-        if self._source_path and self._source_format:
-            self._set_status_text("detected")
-
-    def _browse_output(self):
-        target_text = self.format_combo.currentText()
+    def _browse_output(self) -> None:
+        target = self.format_combo.currentText()
         ext_map = {"SRT": ".srt", "ASS": ".ass", "SSA": ".ssa", "VTT": ".vtt"}
-        ext = ext_map.get(target_text, ".srt")
+        ext = ext_map.get(target, ".srt")
         path, _ = QFileDialog.getSaveFileName(
-            self, tr("@convert.choose_output"),
-            self.output_path_label.text(),
-            f"{target_text} Files (*{ext});;All Files (*.*)",
+            self,
+            tr("@convert.choose_output"),
+            self._resolved_output_path(),
+            f"{target} Files (*{ext});;All Files (*.*)",
         )
         if path:
             self._custom_output_path = path
-            self.output_path_label.setText(path)
+            self._update_output_path()
+            self._refresh_state()
 
-    def _on_convert(self):
+    def _refresh_state(self) -> None:
+        self.target_tag.setText(self.format_combo.currentText())
+        if not self._source_format:
+            self.source_tag.setText("SRT")
+            self.source_value.setText("--")
+            self.output_name_label.setText(tr("@convert.preview_no_output"))
+            self.ready_pill.setText(tr("@convert.preview_waiting"))
+            self.ready_pill.set_tone("neutral")
+            return
+        self.source_tag.setText(self._source_format.name)
+        self.source_value.setText(
+            tr("@convert.preview_source_value", fmt=self._source_format.name, count=self._entry_count)
+        )
+        self._update_output_path()
+        self.ready_pill.setText(tr("@convert.preview_ready"))
+        self.ready_pill.set_tone("success")
+
+    def _on_convert(self) -> None:
         if not self._source_path or not self._source_format:
             return
-        target_text = self.format_combo.currentText()
-        target_fmt = SubtitleFormat[target_text]
-        output_path = self.output_path_label.text()
-        if not output_path or output_path == tr("@convert.auto_output"):
-            self._update_output_path()
-            output_path = self.output_path_label.text()
+        output_path = self._resolved_output_path()
+        target_format = SubtitleFormat[self.format_combo.currentText()]
         self.convert_btn.setEnabled(False)
-        self._set_status_style("converting")
-        self.status_label.setText(tr("@convert.status.converting"))
+        self.ready_pill.setText(tr("@convert.status.converting"))
+        self.ready_pill.set_tone("warning")
         try:
-            result = convert_subtitle(self._source_path, output_path, target_fmt)
+            result = convert_subtitle(self._source_path, output_path, target_format)
             self._last_output_path = output_path
             self.open_folder_btn.setEnabled(True)
-            self._set_status_text("success", msg=result)
-            self.status_message.emit(result)
-        except Exception as e:
-            self._set_status_text("failed", msg=str(e))
             self.convert_btn.setEnabled(True)
+            self.ready_pill.setText(tr("@convert.preview_complete"))
+            self.ready_pill.set_tone("success")
+            self.status_message.emit(result)
+            QMessageBox.information(self, tr("@convert.output_title"), tr("@convert.output_msg", path=output_path))
+        except Exception as exc:
+            self.convert_btn.setEnabled(True)
+            self.ready_pill.setText(tr("@convert.preview_failed"))
+            self.ready_pill.set_tone("danger")
+            QMessageBox.warning(self, tr("@convert.preview_failed"), tr("@convert.status.failed", msg=str(exc)))
 
-    def _on_clear(self):
+    def _on_clear(self) -> None:
         self._source_path = ""
         self._source_format = None
         self._entry_count = 0
         self._custom_output_path = ""
         self._last_output_path = ""
-        self.open_folder_btn.setEnabled(False)
-        self.convert_btn.setEnabled(False)
         self.drop_zone.clear()
-        self.format_value_label.setText("--")
-        self.format_value_label.setStyleSheet(
-            "color: #585b70; font-size: 13px; font-weight: bold;"
-        )
-        self._set_status_text("idle")
-        self._update_output_path()
+        self.convert_btn.setEnabled(False)
+        self.open_folder_btn.setEnabled(False)
+        self._refresh_state()
+        self.status_message.emit(tr("@status.ready"))
 
-    def _open_output_folder(self):
-        if self._last_output_path:
-            folder = os.path.dirname(os.path.abspath(self._last_output_path))
-            try:
+    def _open_output_folder(self) -> None:
+        if not self._last_output_path:
+            return
+        folder = os.path.dirname(os.path.abspath(self._last_output_path))
+        try:
+            if os.name == "nt":
                 subprocess.Popen(["explorer", folder])
-            except Exception:
-                pass
-
-    def _set_status_style(self, state):
-        colors = {
-            "idle": "#6c7086",
-            "detected": "#a6e3a1",
-            "converting": "#f9e2af",
-            "success": "#a6e3a1",
-            "failed": "#f38ba8",
-        }
-        c = colors.get(state, "#6c7086")
-        self.status_label.setStyleSheet(
-            f"QLabel#convert_status {{ color: {c}; font-size: 13px; padding: 8px 0; }}"
-        )
-
-    def _set_status_text(self, state, msg=""):
-        self._set_status_style(state)
-        if state == "idle":
-            self.status_label.setText(tr("@convert.status.idle"))
-        elif state == "detected":
-            fmt = self._source_format.name if self._source_format else "?"
-            self.status_label.setText(
-                tr("@convert.status.detected", fmt=fmt, count=str(self._entry_count))
-            )
-        elif state == "success":
-            self.status_label.setText(tr("@convert.status.success", msg=msg))
-        elif state == "failed":
-            self.status_label.setText(tr("@convert.status.failed", msg=msg))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", folder])
+            else:
+                subprocess.Popen(["xdg-open", folder])
+        except Exception:
+            pass
