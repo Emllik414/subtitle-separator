@@ -79,38 +79,45 @@ class DropZone(QFrame):
         self.icon_label.setText(text)
 
     def set_loaded_metadata(self, path: str, badge: str | None = None, meta: str = "") -> None:
+        """Commit a file as loaded after the owner parsed it successfully."""
         self._file_path = path
         if badge:
             self.set_badge(badge)
-        self.setProperty("state", "loaded")
-        repolish(self)
+        self._set_state("loaded")
         if self._replace_content_on_load:
             self.main_label.setText(os.path.basename(path))
             self.hint_label.setText(meta or path)
+
+    def restore_state(self) -> None:
+        self._set_state("loaded" if self._file_path else "idle")
 
     def _set_state(self, state: str) -> None:
         self.setProperty("state", state)
         repolish(self)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()):
             event.acceptProposedAction()
             self._set_state("hover")
+        else:
+            event.ignore()
 
     def dragLeaveEvent(self, event) -> None:
-        self._set_state("loaded" if self._file_path else "idle")
+        self.restore_state()
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
-        urls = event.mimeData().urls()
-        if urls:
-            path = urls[0].toLocalFile()
-            self._file_path = path
-            self._set_state("loaded")
+        path = next(
+            (url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()),
+            "",
+        )
+        if path:
+            self.restore_state()
             self.file_changed.emit(path)
             event.acceptProposedAction()
         else:
-            self._set_state("idle")
+            self.restore_state()
+            event.ignore()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
@@ -123,12 +130,10 @@ class DropZone(QFrame):
         path, _ = QFileDialog.getOpenFileName(
             self,
             tr("@drop.select_title"),
-            "",
+            os.path.dirname(self._file_path) if self._file_path else "",
             tr("@drop.file_filter"),
         )
         if path:
-            self._file_path = path
-            self._set_state("loaded")
             self.file_changed.emit(path)
 
     @property
