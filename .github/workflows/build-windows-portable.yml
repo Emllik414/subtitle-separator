@@ -18,6 +18,20 @@ on:
       - "packaging/**"
       - "requirements.txt"
       - ".github/workflows/build-windows-portable.yml"
+  pull_request:
+    branches:
+      - master
+    paths:
+      - "main.py"
+      - "gui/**"
+      - "logic/**"
+      - "models/**"
+      - "parsers/**"
+      - "utils/**"
+      - "assets/**"
+      - "packaging/**"
+      - "requirements.txt"
+      - ".github/workflows/build-windows-portable.yml"
 
 permissions:
   contents: write
