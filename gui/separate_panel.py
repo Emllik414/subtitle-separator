@@ -1,18 +1,36 @@
+from __future__ import annotations
+
+import os
+
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton,
-    QGroupBox, QFileDialog, QMessageBox, QCheckBox, QLineEdit, QFrame,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QComboBox,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt, Signal
 
 from gui.drop_zone import DropZone
-from gui.preview_table import PreviewTable
 from gui.i18n import i18n, tr
+from gui.preview_table import PreviewTable
+from gui.ui_components import Card, FileSummary, StatusPill, ToggleSwitch
+from language.detector import (
+    LANGUAGE_GROUP_NAMES,
+    LANGUAGE_GROUP_NAMES_ZH,
+    LanguageGroup,
+    detect_language_assignment,
+)
+from logic.separator import separate
 from models.entry import SubtitleFile
 from models.enums import SubtitleFormat
 from parsers.base import detect_format, get_parser
-from language.detector import detect_language_assignment, LANGUAGE_GROUP_NAMES, LANGUAGE_GROUP_NAMES_ZH, LanguageGroup
-from logic.separator import separate
-from utils.text import read_subtitle_file, write_subtitle_file, strip_ass_tags
+from utils.text import read_subtitle_file, strip_ass_tags, write_subtitle_file
 
 
 class SeparatePanel(QWidget):
@@ -26,299 +44,394 @@ class SeparatePanel(QWidget):
         self.original_nl = "\r\n"
         self.original_encoding = "utf-8"
         self.detected_assignment: dict[int, LanguageGroup] = {}
+        self._input_path = ""
 
-        layout = QVBoxLayout(self)
-        layout.setSpacing(8)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(16)
 
-        # --- Input Drop Zone ---
-        self.drop_zone = DropZone("@sep.drop_label")
+        left = QWidget()
+        left.setFixedWidth(330)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(14)
+        left_layout.addWidget(self._build_import_card())
+        left_layout.addWidget(self._build_language_card())
+        left_layout.addStretch()
+        root.addWidget(left)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(14)
+        right_layout.addWidget(self._build_preview_card(), 1)
+        right_layout.addWidget(self._build_output_card())
+        root.addWidget(right, 1)
+
+        self.lang1_path.installEventFilter(self)
+        self.lang2_path.installEventFilter(self)
+        i18n.language_changed.connect(self._on_language_changed)
+        self._on_language_changed(i18n.current_lang)
+
+    def _build_import_card(self) -> Card:
+        card = Card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(17, 16, 17, 16)
+        layout.setSpacing(12)
+
+        title_row = QHBoxLayout()
+        self.import_title = QLabel()
+        self.import_title.setObjectName("card_title")
+        self.format_hint = QLabel("SRT · ASS · SSA · VTT")
+        self.format_hint.setObjectName("format_hint")
+        title_row.addWidget(self.import_title)
+        title_row.addStretch()
+        title_row.addWidget(self.format_hint)
+        layout.addLayout(title_row)
+
+        self.drop_zone = DropZone("@sep.preview_drop_main", badge_text="SRT")
         self.drop_zone.file_changed.connect(self._on_file_loaded)
         layout.addWidget(self.drop_zone)
 
-        # File info bar
-        self.info_label = QLabel(tr("@sep.no_file"))
-        self.info_label.setStyleSheet("color: #6c7086; padding: 2px;")
-        layout.addWidget(self.info_label)
+        self.file_summary = FileSummary()
+        self.file_summary.hide()
+        self.file_summary.replace_requested.connect(self.drop_zone._browse)
+        layout.addWidget(self.file_summary)
+        return card
 
-        # --- Language Detection ---
-        self.lang_group = QGroupBox(tr("@sep.auto_detect"))
-        lang_layout = QVBoxLayout(self.lang_group)
+    def _build_language_card(self) -> Card:
+        card = Card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(17, 16, 17, 16)
+        layout.setSpacing(12)
 
-        self.auto_detect_cb = QCheckBox(tr("@sep.auto_detect"))
-        self.auto_detect_cb.setChecked(True)
-        self.auto_detect_cb.toggled.connect(self._on_detection_mode_changed)
-        lang_layout.addWidget(self.auto_detect_cb)
+        head = QHBoxLayout()
+        text_col = QVBoxLayout()
+        text_col.setSpacing(3)
+        self.auto_title = QLabel()
+        self.auto_title.setObjectName("card_title")
+        self.auto_desc = QLabel()
+        self.auto_desc.setObjectName("card_subtitle")
+        self.auto_desc.setWordWrap(True)
+        text_col.addWidget(self.auto_title)
+        text_col.addWidget(self.auto_desc)
+        head.addLayout(text_col, 1)
+        self.auto_toggle = ToggleSwitch()
+        self.auto_toggle.setChecked(True)
+        self.auto_toggle.toggled.connect(self._on_detection_mode_changed)
+        head.addWidget(self.auto_toggle, 0, Qt.AlignTop)
+        layout.addLayout(head)
 
-        manual_frame = QFrame()
-        manual_layout = QHBoxLayout(manual_frame)
-        manual_layout.setContentsMargins(0, 0, 0, 0)
+        divider = QFrame()
+        divider.setObjectName("divider")
+        layout.addWidget(divider)
 
-        line1_layout = QVBoxLayout()
-        self.line1_label_w = QLabel(tr("@sep.line1_label"))
-        line1_layout.addWidget(self.line1_label_w)
-        self.lang1_combo = QComboBox()
-        self.lang1_combo.addItem(tr("@sep.line1"), 0)
-        self.lang1_combo.addItem(tr("@sep.line2"), 1)
-        self.lang1_combo.setEnabled(False)
-        line1_layout.addWidget(self.lang1_combo)
-        manual_layout.addLayout(line1_layout)
+        self.detect_label = QLabel()
+        self.detect_label.setObjectName("small_label")
+        layout.addWidget(self.detect_label)
+        chip_row = QHBoxLayout()
+        chip_row.setSpacing(7)
+        self.lang1_chip = QPushButton("--")
+        self.lang2_chip = QPushButton("--")
+        for chip in (self.lang1_chip, self.lang2_chip):
+            chip.setObjectName("language_chip")
+            chip.setCursor(Qt.PointingHandCursor)
+            chip.setEnabled(False)
+            chip.clicked.connect(self._swap_manual_assignment)
+            chip_row.addWidget(chip)
+        chip_row.addStretch()
+        layout.addLayout(chip_row)
 
-        line2_layout = QVBoxLayout()
-        self.line2_label_w = QLabel(tr("@sep.line2_label"))
-        line2_layout.addWidget(self.line2_label_w)
-        self.lang2_combo = QComboBox()
-        self.lang2_combo.addItem(tr("@sep.line1"), 0)
-        self.lang2_combo.addItem(tr("@sep.line2"), 1)
-        self.lang2_combo.setCurrentIndex(1)
-        self.lang2_combo.setEnabled(False)
-        line2_layout.addWidget(self.lang2_combo)
-        manual_layout.addLayout(line2_layout)
+        divider2 = QFrame()
+        divider2.setObjectName("divider")
+        layout.addWidget(divider2)
 
-        lang_layout.addWidget(manual_frame)
-
-        self.detected_label = QLabel(tr("@sep.detected"))
-        self.lang1_label = QLabel("--")
-        self.lang2_label = QLabel("--")
-        labels_layout = QHBoxLayout()
-        labels_layout.addWidget(self.detected_label)
-        labels_layout.addWidget(self.lang1_label)
-        labels_layout.addWidget(QLabel(" | "))
-        labels_layout.addWidget(self.lang2_label)
-        labels_layout.addStretch()
-        lang_layout.addLayout(labels_layout)
-
-        layout.addWidget(self.lang_group)
-
-        # --- Output format ---
-        fmt_layout = QHBoxLayout()
-        self.fmt_label = QLabel(tr("@sep.output_format"))
-        fmt_layout.addWidget(self.fmt_label)
+        fmt_row = QHBoxLayout()
+        fmt_text = QVBoxLayout()
+        fmt_text.setSpacing(3)
+        self.fmt_label = QLabel()
+        self.fmt_label.setObjectName("small_label")
+        self.fmt_hint_label = QLabel()
+        self.fmt_hint_label.setObjectName("card_subtitle")
+        self.fmt_hint_label.setWordWrap(True)
+        fmt_text.addWidget(self.fmt_label)
+        fmt_text.addWidget(self.fmt_hint_label)
+        fmt_row.addLayout(fmt_text, 1)
         self.fmt_combo = QComboBox()
-        self.fmt_combo.setMinimumWidth(170)
-        self._populate_format_combo()
-        fmt_layout.addWidget(self.fmt_combo)
-        fmt_layout.addStretch()
-        layout.addLayout(fmt_layout)
+        self.fmt_combo.setObjectName("compact_combo")
+        self.fmt_combo.setFixedWidth(122)
+        self.fmt_combo.currentIndexChanged.connect(self._on_output_format_changed)
+        fmt_row.addWidget(self.fmt_combo)
+        layout.addLayout(fmt_row)
+        return card
 
-        # --- Preview ---
+    def _build_preview_card(self) -> Card:
+        card = Card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QFrame()
+        header.setObjectName("preview_header")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(18, 14, 18, 13)
+        text_col = QVBoxLayout()
+        text_col.setSpacing(3)
+        self.preview_title = QLabel()
+        self.preview_title.setObjectName("preview_title")
+        self.preview_meta = QLabel()
+        self.preview_meta.setObjectName("preview_meta")
+        text_col.addWidget(self.preview_title)
+        text_col.addWidget(self.preview_meta)
+        header_layout.addLayout(text_col)
+        header_layout.addStretch()
+        self.preview_status = StatusPill(tone="neutral")
+        header_layout.addWidget(self.preview_status)
+        layout.addWidget(header)
+
         self.preview_table = PreviewTable()
         layout.addWidget(self.preview_table, 1)
+        return card
 
-        # --- Output paths + Execute ---
-        out_layout = QVBoxLayout()
-        out_layout.setSpacing(6)
+    def _build_output_card(self) -> Card:
+        card = Card()
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(16, 13, 16, 13)
+        layout.setSpacing(12)
 
-        l1_out = QHBoxLayout()
-        self.lang1_out_label = QLabel(tr("@sep.lang1_out"))
-        l1_out.addWidget(self.lang1_out_label)
+        lang1_group = QVBoxLayout()
+        lang1_group.setSpacing(5)
+        self.lang1_out_label = QLabel()
+        self.lang1_out_label.setObjectName("small_label")
         self.lang1_path = QLineEdit()
-        self.lang1_path.setPlaceholderText(tr("@sep.lang1_placeholder"))
-        l1_out.addWidget(self.lang1_path)
-        l1_browse = QPushButton("...")
-        l1_browse.setFixedWidth(36)
-        l1_browse.setStyleSheet("background-color: #45475a; color: #cdd6f4; border-radius: 4px; padding: 4px; font-weight: bold;")
-        l1_browse.setCursor(Qt.PointingHandCursor)
-        l1_browse.clicked.connect(lambda: self._browse_output(self.lang1_path, "lang1"))
-        l1_out.addWidget(l1_browse)
-        out_layout.addLayout(l1_out)
+        self.lang1_path.setObjectName("path_field")
+        lang1_group.addWidget(self.lang1_out_label)
+        lang1_group.addWidget(self.lang1_path)
+        layout.addLayout(lang1_group, 1)
 
-        l2_out = QHBoxLayout()
-        self.lang2_out_label = QLabel(tr("@sep.lang2_out"))
-        l2_out.addWidget(self.lang2_out_label)
+        lang2_group = QVBoxLayout()
+        lang2_group.setSpacing(5)
+        self.lang2_out_label = QLabel()
+        self.lang2_out_label.setObjectName("small_label")
         self.lang2_path = QLineEdit()
-        self.lang2_path.setPlaceholderText(tr("@sep.lang2_placeholder"))
-        l2_out.addWidget(self.lang2_path)
-        l2_browse = QPushButton("...")
-        l2_browse.setFixedWidth(40)
-        l2_browse.clicked.connect(lambda: self._browse_output(self.lang2_path, "lang2"))
-        l2_out.addWidget(l2_browse)
-        out_layout.addLayout(l2_out)
+        self.lang2_path.setObjectName("path_field")
+        lang2_group.addWidget(self.lang2_out_label)
+        lang2_group.addWidget(self.lang2_path)
+        layout.addLayout(lang2_group, 1)
 
-        layout.addLayout(out_layout)
-
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        self.separate_btn = QPushButton(tr("@sep.btn_separate"))
-        self.separate_btn.setFixedWidth(140)
+        self.separate_btn = QPushButton()
+        self.separate_btn.setObjectName("primary_button")
+        self.separate_btn.setCursor(Qt.PointingHandCursor)
         self.separate_btn.setEnabled(False)
         self.separate_btn.clicked.connect(self._on_separate)
-        btn_layout.addWidget(self.separate_btn)
-        layout.addLayout(btn_layout)
+        layout.addWidget(self.separate_btn, 0, Qt.AlignBottom)
+        return card
 
-        i18n.language_changed.connect(self._on_language_changed)
-
-    def _on_language_changed(self, lang: str):
-        self.lang_group.setTitle("")
-        self.auto_detect_cb.setText(tr("@sep.auto_detect"))
-        self.line1_label_w.setText(tr("@sep.line1_label"))
-        self.line2_label_w.setText(tr("@sep.line2_label"))
-        self.detected_label.setText(tr("@sep.detected"))
-        self.fmt_label.setText(tr("@sep.output_format"))
-        self.lang1_out_label.setText(tr("@sep.lang1_out"))
-        self.lang2_out_label.setText(tr("@sep.lang2_out"))
-        self.lang1_path.setPlaceholderText(tr("@sep.lang1_placeholder"))
-        self.lang2_path.setPlaceholderText(tr("@sep.lang2_placeholder"))
-        self.separate_btn.setText(tr("@sep.btn_separate"))
-
-        # Rebuild combo items
-        self.lang1_combo.clear()
-        self.lang1_combo.addItem(tr("@sep.line1"), 0)
-        self.lang1_combo.addItem(tr("@sep.line2"), 1)
-        self.lang2_combo.clear()
-        self.lang2_combo.addItem(tr("@sep.line1"), 0)
-        self.lang2_combo.addItem(tr("@sep.line2"), 1)
-        self.lang2_combo.setCurrentIndex(1)
-
+    def _on_language_changed(self, _lang: str) -> None:
+        self.import_title.setText(tr("@sep.preview_import_title"))
+        self.auto_title.setText(tr("@sep.preview_auto_title"))
+        self.auto_desc.setText(tr("@sep.preview_auto_desc"))
+        self.detect_label.setText(tr("@sep.preview_detect_result"))
+        self.fmt_label.setText(tr("@sep.preview_output_format"))
+        self.fmt_hint_label.setText(tr("@sep.preview_output_hint"))
+        self.preview_title.setText(tr("@sep.preview_title"))
+        self.separate_btn.setText(tr("@sep.preview_start"))
         self._populate_format_combo()
+        self._refresh_language_ui()
+        self._refresh_preview_header()
 
-        # Re-apply detection result labels
-        if self.sub_file:
-            self._refresh_lang_labels()
-        else:
-            self.info_label.setText(tr("@sep.no_file"))
-
-    def _populate_format_combo(self):
+    def _populate_format_combo(self) -> None:
+        previous = self.fmt_combo.currentText() if self.fmt_combo.count() else ""
+        self.fmt_combo.blockSignals(True)
         self.fmt_combo.clear()
-        self.fmt_combo.addItems([
-            tr("@sep.same_as_input"), "SRT", "ASS", "VTT"
-        ])
+        self.fmt_combo.addItems([tr("@sep.same_as_input"), "SRT", "ASS", "VTT"])
+        index = self.fmt_combo.findText(previous)
+        self.fmt_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.fmt_combo.blockSignals(False)
 
-    def _refresh_lang_labels(self):
-        if not self.detected_assignment:
-            self.lang1_label.setText(tr("@sep.no_lang"))
-            self.lang2_label.setText("--")
-            return
+    def _language_name(self, group: LanguageGroup | None, fallback: str) -> str:
+        if group is None:
+            return fallback
         names = LANGUAGE_GROUP_NAMES_ZH if i18n.current_lang == "zh" else LANGUAGE_GROUP_NAMES
-        sorted_items = sorted(self.detected_assignment.items(), key=lambda x: x[0])
-        if len(sorted_items) >= 1:
-            _, g0 = sorted_items[0]
-            self.lang1_label.setText(names.get(g0, "?"))
-        if len(sorted_items) >= 2:
-            _, g1 = sorted_items[1]
-            self.lang2_label.setText(names.get(g1, "?"))
+        return names.get(group, fallback)
 
-    def _on_file_loaded(self, path: str):
+    def _refresh_language_ui(self) -> None:
+        group1 = self.detected_assignment.get(self.lang1_line)
+        group2 = self.detected_assignment.get(self.lang2_line)
+        name1 = self._language_name(group1, tr("@sep.language_one"))
+        name2 = self._language_name(group2, tr("@sep.language_two"))
+        self.lang1_chip.setText(tr("@sep.preview_line_language", line=self.lang1_line + 1, language=name1))
+        self.lang2_chip.setText(tr("@sep.preview_line_language", line=self.lang2_line + 1, language=name2))
+        self.lang1_out_label.setText(tr("@sep.preview_output_name", language=name1))
+        self.lang2_out_label.setText(tr("@sep.preview_output_name", language=name2))
+
+    def _on_file_loaded(self, path: str) -> None:
         try:
-            text, enc, nl = read_subtitle_file(path)
-            self.original_encoding = enc
-            self.original_nl = nl
+            text, encoding, newline = read_subtitle_file(path)
             fmt = detect_format(text)
             parser = get_parser(fmt)
             self.sub_file = parser.parse(text)
-
+            self._input_path = path
+            self.original_encoding = encoding
+            self.original_nl = newline
             count = len(self.sub_file.entries)
-            lines_sample = ", ".join(str(len(e.lines)) for e in self.sub_file.entries[:3])
-            more = "..." if count > 3 else ""
-            self.info_label.setText(tr("@sep.format_info", fmt=fmt.name, count=count, lines=f"{lines_sample}{more}"))
-            self.info_label.setStyleSheet("color: #a6e3a1; padding: 2px;")
+            self.drop_zone.set_loaded_metadata(path, fmt.name)
+            self.file_summary.set_file(
+                os.path.basename(path),
+                tr("@sep.preview_file_meta", fmt=fmt.name, count=count, encoding=encoding.upper()),
+            )
+            self.file_summary.show()
             self.separate_btn.setEnabled(True)
-
-            if self.auto_detect_cb.isChecked():
+            if self.auto_toggle.isChecked():
                 self._run_auto_detect()
-
-            ext_map = {SubtitleFormat.SRT: ".srt", SubtitleFormat.ASS: ".ass", SubtitleFormat.SSA: ".ass", SubtitleFormat.VTT: ".vtt"}
-            ext = ext_map.get(fmt, ".srt")
-            base = path.rsplit(".", 1)[0] if "." in path else path
-            self.lang1_path.setText(f"{base}_lang1{ext}")
-            self.lang2_path.setText(f"{base}_lang2{ext}")
-
+            else:
+                self.detected_assignment = {}
+                self.lang1_line, self.lang2_line = 0, 1
+            self._update_default_paths()
             self._update_preview()
-
-        except Exception as e:
-            self.info_label.setText(tr("@error.load", msg=str(e)))
-            self.info_label.setStyleSheet("color: #f38ba8; padding: 2px;")
+            self.status_message.emit(tr("@sep.preview_loaded_status", count=count))
+        except Exception as exc:
             self.sub_file = None
             self.separate_btn.setEnabled(False)
+            self.file_summary.hide()
+            self.preview_table.clear_preview()
+            self.preview_status.setText(tr("@sep.preview_load_failed"))
+            self.preview_status.set_tone("danger")
+            QMessageBox.warning(self, tr("@sep.preview_load_failed"), tr("@error.load", msg=str(exc)))
 
-    def _run_auto_detect(self):
+    def _run_auto_detect(self) -> None:
         if not self.sub_file:
             return
         assignment = detect_language_assignment(self.sub_file.entries)
         self.detected_assignment = assignment
-        self._refresh_lang_labels()
-
-        if not assignment:
-            return
-
-        sorted_items = sorted(assignment.items(), key=lambda x: x[0])
-        if len(sorted_items) >= 1:
-            idx0, _ = sorted_items[0]
-            self.lang1_combo.setCurrentIndex(idx0)
-            self.lang1_line = idx0
+        sorted_items = sorted(assignment.items(), key=lambda item: item[0])
         if len(sorted_items) >= 2:
-            idx1, _ = sorted_items[1]
-            self.lang2_combo.setCurrentIndex(idx1)
-            self.lang2_line = idx1
+            self.lang1_line = sorted_items[0][0]
+            self.lang2_line = sorted_items[1][0]
+        else:
+            self.lang1_line, self.lang2_line = 0, 1
+        self._refresh_language_ui()
 
-    def _on_detection_mode_changed(self, checked: bool):
-        manual = not checked
-        self.lang1_combo.setEnabled(manual)
-        self.lang2_combo.setEnabled(manual)
+    def _on_detection_mode_changed(self, checked: bool) -> None:
+        self.lang1_chip.setEnabled(not checked)
+        self.lang2_chip.setEnabled(not checked)
         if checked and self.sub_file:
             self._run_auto_detect()
-            self._update_preview()
+        self._update_default_paths()
+        self._update_preview()
 
-    def _update_preview(self):
+    def _swap_manual_assignment(self) -> None:
+        if self.auto_toggle.isChecked():
+            return
+        self.lang1_line, self.lang2_line = self.lang2_line, self.lang1_line
+        self._refresh_language_ui()
+        self._update_default_paths()
+        self._update_preview()
+
+    def _refresh_preview_header(self, missing_count: int = 0) -> None:
+        if not self.sub_file:
+            self.preview_meta.setText(tr("@sep.preview_empty_meta"))
+            self.preview_status.setText(tr("@sep.preview_waiting"))
+            self.preview_status.set_tone("neutral")
+            return
+        count = len(self.sub_file.entries)
+        mode = tr("@sep.preview_auto_success") if self.auto_toggle.isChecked() else tr("@sep.preview_manual_mode")
+        self.preview_meta.setText(tr("@sep.preview_meta", count=count, mode=mode))
+        if missing_count:
+            self.preview_status.setText(tr("@sep.preview_missing_status", count=missing_count))
+            self.preview_status.set_tone("warning")
+        else:
+            self.preview_status.setText(tr("@sep.preview_all_normal"))
+            self.preview_status.set_tone("success")
+
+    def _update_preview(self) -> None:
         if not self.sub_file:
             self.preview_table.clear_preview()
+            self._refresh_preview_header()
             return
-
-        self.lang1_line = self.lang1_combo.currentData() if self.lang1_combo.currentData() is not None else 0
-        self.lang2_line = self.lang2_combo.currentData() if self.lang2_combo.currentData() is not None else 1
-
-        empty = [e.index for e in self.sub_file.entries if len(e.lines) <= max(self.lang1_line, self.lang2_line)]
-
+        max_line = max(self.lang1_line, self.lang2_line)
+        empty = [entry.index for entry in self.sub_file.entries if len(entry.lines) <= max_line]
+        name1 = self._language_name(self.detected_assignment.get(self.lang1_line), tr("@sep.language_one"))
+        name2 = self._language_name(self.detected_assignment.get(self.lang2_line), tr("@sep.language_two"))
         self.preview_table.show_separation_preview(
-            self.sub_file.entries, self.lang1_line, self.lang2_line, empty,
+            self.sub_file.entries,
+            self.lang1_line,
+            self.lang2_line,
+            empty,
+            tr("@sep.preview_line_language", line=self.lang1_line + 1, language=name1),
+            tr("@sep.preview_line_language", line=self.lang2_line + 1, language=name2),
         )
+        self._refresh_preview_header(len(empty))
 
-    def _browse_output(self, line_edit: QLineEdit, suffix: str):
+    def _resolve_output_format(self) -> SubtitleFormat:
+        if not self.sub_file:
+            return SubtitleFormat.SRT
+        choice = self.fmt_combo.currentText()
+        if choice == tr("@sep.same_as_input") or choice == "Same as input":
+            return self.sub_file.format
+        try:
+            return SubtitleFormat[choice]
+        except KeyError:
+            return self.sub_file.format
+
+    def _update_default_paths(self) -> None:
+        if not self._input_path or not self.sub_file:
+            return
+        out_fmt = self._resolve_output_format()
+        ext_map = {
+            SubtitleFormat.SRT: ".srt",
+            SubtitleFormat.ASS: ".ass",
+            SubtitleFormat.SSA: ".ssa",
+            SubtitleFormat.VTT: ".vtt",
+        }
+        ext = ext_map.get(out_fmt, ".srt")
+        base, _ = os.path.splitext(self._input_path)
+        name1 = self._language_name(self.detected_assignment.get(self.lang1_line), tr("@sep.language_one"))
+        name2 = self._language_name(self.detected_assignment.get(self.lang2_line), tr("@sep.language_two"))
+        self.lang1_path.setText(f"{base}_{name1}{ext}")
+        self.lang2_path.setText(f"{base}_{name2}{ext}")
+        self._refresh_language_ui()
+
+    def _on_output_format_changed(self, _index: int) -> None:
+        self._update_default_paths()
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() == QEvent.MouseButtonDblClick and watched in (self.lang1_path, self.lang2_path):
+            suffix = "lang1" if watched is self.lang1_path else "lang2"
+            self._browse_output(watched, suffix)
+            return True
+        return super().eventFilter(watched, event)
+
+    def _browse_output(self, line_edit: QLineEdit, suffix: str) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, f"Save {suffix} as", "",
-            tr("@drop.file_filter")
+            self,
+            tr("@sep.preview_choose_output", language=suffix),
+            line_edit.text(),
+            tr("@drop.file_filter"),
         )
         if path:
             line_edit.setText(path)
 
-    def _on_separate(self):
+    def _on_separate(self) -> None:
         if not self.sub_file:
             return
-
-        lang1_path = self.lang1_path.text().strip()
-        lang2_path = self.lang2_path.text().strip()
-        if not lang1_path or not lang2_path:
+        path1 = self.lang1_path.text().strip()
+        path2 = self.lang2_path.text().strip()
+        if not path1 or not path2:
             QMessageBox.warning(self, tr("@sep.missing_path_title"), tr("@sep.missing_path_msg"))
             return
-
-        self.lang1_line = self.lang1_combo.currentData() if self.lang1_combo.currentData() is not None else 0
-        self.lang2_line = self.lang2_combo.currentData() if self.lang2_combo.currentData() is not None else 1
-
         result = separate(self.sub_file, self.lang1_line, self.lang2_line)
-
-        fmt_choice = self.fmt_combo.currentText()
-        if fmt_choice == tr("@sep.same_as_input") or fmt_choice == "Same as input":
-            out_fmt = self.sub_file.format
-        else:
-            try:
-                out_fmt = SubtitleFormat[fmt_choice]
-            except KeyError:
-                out_fmt = self.sub_file.format
-
-        # Strip ASS style override tags when outputting to non-ASS formats
+        out_fmt = self._resolve_output_format()
         if out_fmt not in (SubtitleFormat.ASS, SubtitleFormat.SSA):
-            for subf in (result.lang1_file, result.lang2_file):
-                for entry in subf.entries:
+            for subtitle_file in (result.lang1_file, result.lang2_file):
+                for entry in subtitle_file.entries:
                     entry.lines = [strip_ass_tags(line) for line in entry.lines]
-
-        parser_cls = get_parser(out_fmt)
-
-        for path, subf in [(lang1_path, result.lang1_file), (lang2_path, result.lang2_file)]:
-            subf.format = out_fmt
-            text = parser_cls.write(subf)
-            write_subtitle_file(path, text, newline=self.original_nl)
-
-        msg = tr("@sep.complete_msg", path1=lang1_path, path2=lang2_path)
+        parser = get_parser(out_fmt)
+        for path, subtitle_file in ((path1, result.lang1_file), (path2, result.lang2_file)):
+            subtitle_file.format = out_fmt
+            write_subtitle_file(path, parser.write(subtitle_file), newline=self.original_nl)
+        message = tr("@sep.complete_msg", path1=path1, path2=path2)
         if result.empty_entries:
-            msg += "\n\n" + tr("@sep.warn_missing", n=len(result.empty_entries))
-        QMessageBox.information(self, tr("@sep.complete_title"), msg)
-        self.status_message.emit(tr("@sep.status_done", path1=lang1_path, path2=lang2_path))
+            message += "\n\n" + tr("@sep.warn_missing", n=len(result.empty_entries))
+        QMessageBox.information(self, tr("@sep.complete_title"), message)
+        self.status_message.emit(tr("@sep.status_done", path1=path1, path2=path2))
