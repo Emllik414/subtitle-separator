@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Literal
@@ -27,81 +28,81 @@ def merge(
     timestamp_tolerance_ms: int = 100,
     header_source: Literal["primary", "secondary"] = "primary",
 ) -> MergeResult:
-    """
-    Merge two monolingual subtitle files into one bilingual file.
-    Entries are matched by index number.
-    """
-    # Build index -> entry maps
-    primary_map: dict[int, SubtitleEntry] = {e.index: e for e in primary.entries}
-    secondary_map: dict[int, SubtitleEntry] = {e.index: e for e in secondary.entries}
+    """Merge two monolingual subtitle files into one bilingual file."""
+    primary_map = {entry.index: entry for entry in primary.entries}
+    secondary_map = {entry.index: entry for entry in secondary.entries}
 
-    all_indices = sorted(set(primary_map.keys()) | set(secondary_map.keys()))
+    all_indices = sorted(set(primary_map) | set(secondary_map))
     merged_entries = []
     conflicts = []
-    tolerance = abs(timestamp_tolerance_ms)  # ms
+    tolerance = abs(timestamp_tolerance_ms)
 
     for idx in all_indices:
-        p_entry = primary_map.get(idx)
-        s_entry = secondary_map.get(idx)
+        original_primary = primary_map.get(idx)
+        original_secondary = secondary_map.get(idx)
+        primary_entry = original_primary
+        secondary_entry = original_secondary
 
-        if p_entry is None:
+        if primary_entry is None:
             conflicts.append((idx, MergeConflictType.MISSING_PRIMARY, "Primary missing"))
             if on_entry_count_mismatch == "truncate":
                 break
-            # Pad: use secondary as-is, empty primary line
-            p_entry = SubtitleEntry(
+            primary_entry = SubtitleEntry(
                 index=idx,
-                start_time=s_entry.start_time,
-                end_time=s_entry.end_time,
+                start_time=secondary_entry.start_time,
+                end_time=secondary_entry.end_time,
                 lines=[""],
                 metadata={},
             )
 
-        if s_entry is None:
+        if secondary_entry is None:
             conflicts.append((idx, MergeConflictType.MISSING_SECONDARY, "Secondary missing"))
             if on_entry_count_mismatch == "truncate":
                 break
-            s_entry = SubtitleEntry(
+            secondary_entry = SubtitleEntry(
                 index=idx,
-                start_time=p_entry.start_time,
-                end_time=p_entry.end_time,
+                start_time=primary_entry.start_time,
+                end_time=primary_entry.end_time,
                 lines=[""],
                 metadata={},
             )
 
-        # Timestamp check
-        start_diff = abs((p_entry.start_time - s_entry.start_time).total_seconds() * 1000)
-        end_diff = abs((p_entry.end_time - s_entry.end_time).total_seconds() * 1000)
+        start_diff = abs((primary_entry.start_time - secondary_entry.start_time).total_seconds() * 1000)
+        end_diff = abs((primary_entry.end_time - secondary_entry.end_time).total_seconds() * 1000)
         max_diff = max(start_diff, end_diff)
-
         if max_diff > tolerance:
             conflicts.append((
-                idx, MergeConflictType.TIMESTAMP_MISMATCH,
-                f"Start diff: {start_diff:.0f}ms, End diff: {end_diff:.0f}ms"
+                idx,
+                MergeConflictType.TIMESTAMP_MISMATCH,
+                f"Start diff: {start_diff:.0f}ms, End diff: {end_diff:.0f}ms",
             ))
 
-        # Determine timestamps
-        if timestamp_source == "primary":
-            start_time, end_time = p_entry.start_time, p_entry.end_time
-        else:
-            start_time, end_time = s_entry.start_time, s_entry.end_time
+        timestamp_entry = primary_entry if timestamp_source == "primary" else secondary_entry
+        combined_lines = (
+            primary_entry.lines + secondary_entry.lines
+            if ordering == "primary_first"
+            else secondary_entry.lines + primary_entry.lines
+        )
 
-        # Combine lines
-        if ordering == "primary_first":
-            combined_lines = p_entry.lines + s_entry.lines
-        else:
-            combined_lines = s_entry.lines + p_entry.lines
+        preferred = original_primary if header_source == "primary" else original_secondary
+        fallback = original_secondary if header_source == "primary" else original_primary
+        metadata_source = preferred or fallback
+        metadata = deepcopy(metadata_source.metadata) if metadata_source else {}
 
         merged_entries.append(SubtitleEntry(
             index=idx,
-            start_time=start_time,
-            end_time=end_time,
+            start_time=timestamp_entry.start_time,
+            end_time=timestamp_entry.end_time,
             lines=combined_lines,
+            metadata=metadata,
         ))
 
-    header = primary.header if header_source == "primary" else secondary.header
-
+    header_file = primary if header_source == "primary" else secondary
     return MergeResult(
-        merged_file=SubtitleFile(entries=merged_entries, format=primary.format, header=header),
+        merged_file=SubtitleFile(
+            entries=merged_entries,
+            format=primary.format,
+            header=header_file.header,
+        ),
         conflicts=conflicts,
     )

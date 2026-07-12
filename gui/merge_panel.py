@@ -1,18 +1,39 @@
+from __future__ import annotations
+
+import os
+
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QGroupBox, QFileDialog, QMessageBox, QRadioButton,
-    QButtonGroup, QLineEdit, QComboBox, QSpinBox,
+    QFileDialog,
+    QComboBox,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt, Signal
 
 from gui.drop_zone import DropZone
-from gui.preview_table import PreviewTable
 from gui.i18n import i18n, tr
+import gui.i18n_extra  # noqa: F401
+from gui.preview_table import PreviewTable
+from gui.ui_components import Card, FileSummary, PillGroup, SettingBox, StatusPill
+from logic.merger import merge
 from models.entry import SubtitleFile
 from models.enums import SubtitleFormat
 from parsers.base import detect_format, get_parser
-from logic.merger import merge
-from utils.text import read_subtitle_file, write_subtitle_file, strip_ass_tags
+from utils.text import (
+    ensure_extension,
+    paths_equal,
+    read_subtitle_file,
+    strip_ass_tags,
+    write_subtitle_file,
+)
 
 
 class MergePanel(QWidget):
@@ -22,310 +43,456 @@ class MergePanel(QWidget):
         super().__init__()
         self.primary_file: SubtitleFile | None = None
         self.secondary_file: SubtitleFile | None = None
+        self.primary_encoding = "utf-8"
+        self.secondary_encoding = "utf-8"
+        self.primary_path = ""
+        self.secondary_path = ""
+        self._last_result = None
+        self._output_path_custom = False
 
-        layout = QVBoxLayout(self)
-        layout.setSpacing(8)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(16)
 
-        # --- Dual Drop Zones ---
-        drop_layout = QHBoxLayout()
-        drop_layout.setSpacing(8)
+        left = QWidget()
+        left.setFixedWidth(360)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(14)
+        left_layout.addWidget(self._build_import_card())
+        left_layout.addWidget(self._build_options_card(), 1)
+        root.addWidget(left)
 
-        left_col = QVBoxLayout()
-        self.primary_label_w = QLabel(tr("@merge.primary_label"))
-        left_col.addWidget(self.primary_label_w)
-        self.primary_drop = DropZone("@merge.primary_drop")
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(14)
+        right_layout.addWidget(self._build_preview_card(), 1)
+        right_layout.addWidget(self._build_output_card())
+        root.addWidget(right, 1)
+
+        self.output_path.installEventFilter(self)
+        self.output_path.textEdited.connect(self._mark_output_custom)
+        i18n.language_changed.connect(self._on_language_changed)
+        self._on_language_changed(i18n.current_lang)
+
+    def _build_import_card(self) -> Card:
+        card = Card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(17, 16, 17, 16)
+        layout.setSpacing(11)
+
+        self.import_title = QLabel()
+        self.import_title.setObjectName("card_title")
+        self.import_desc = QLabel()
+        self.import_desc.setObjectName("card_subtitle")
+        self.import_desc.setWordWrap(True)
+        layout.addWidget(self.import_title)
+        layout.addWidget(self.import_desc)
+
+        drops = QHBoxLayout()
+        drops.setSpacing(10)
+        self.primary_drop = DropZone(
+            "@merge.preview_primary_drop",
+            compact=True,
+            badge_text="ZH",
+            replace_content_on_load=True,
+        )
+        self.secondary_drop = DropZone(
+            "@merge.preview_secondary_drop",
+            compact=True,
+            badge_text="EN",
+            replace_content_on_load=True,
+        )
         self.primary_drop.file_changed.connect(self._on_primary_loaded)
-        left_col.addWidget(self.primary_drop)
-        self.primary_info = QLabel(tr("@merge.no_file"))
-        self.primary_info.setStyleSheet("color: #6c7086;")
-        left_col.addWidget(self.primary_info)
-        drop_layout.addLayout(left_col)
-
-        right_col = QVBoxLayout()
-        self.secondary_label_w = QLabel(tr("@merge.secondary_label"))
-        right_col.addWidget(self.secondary_label_w)
-        self.secondary_drop = DropZone("@merge.secondary_drop")
         self.secondary_drop.file_changed.connect(self._on_secondary_loaded)
-        right_col.addWidget(self.secondary_drop)
-        self.secondary_info = QLabel(tr("@merge.no_file"))
-        self.secondary_info.setStyleSheet("color: #6c7086;")
-        right_col.addWidget(self.secondary_info)
-        drop_layout.addLayout(right_col)
+        drops.addWidget(self.primary_drop)
+        drops.addWidget(self.secondary_drop)
+        layout.addLayout(drops)
 
-        layout.addLayout(drop_layout)
+        self.ready_summary = FileSummary()
+        self.ready_summary.menu_button.hide()
+        self.ready_summary.hide()
+        layout.addWidget(self.ready_summary)
+        return card
 
-        # --- Options ---
-        self.options_group = QGroupBox(tr("@merge.options"))
-        options_layout = QVBoxLayout(self.options_group)
-        options_layout.setSpacing(4)
+    def _build_options_card(self) -> Card:
+        card = Card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(17, 16, 17, 16)
+        layout.setSpacing(11)
+        self.options_title = QLabel()
+        self.options_title.setObjectName("card_title")
+        layout.addWidget(self.options_title)
 
-        # Timestamp source
-        self.ts_label = QLabel(tr("@merge.ts_source"))
-        options_layout.addWidget(self.ts_label)
-        self.ts_btn_group = QButtonGroup(self)
-        ts_row = QHBoxLayout()
-        self.ts_primary_rb = QRadioButton(tr("@merge.ts_primary"))
-        self.ts_primary_rb.setChecked(True)
-        self.ts_secondary_rb = QRadioButton(tr("@merge.ts_secondary"))
-        self.ts_btn_group.addButton(self.ts_primary_rb, 0)
-        self.ts_btn_group.addButton(self.ts_secondary_rb, 1)
-        ts_row.addWidget(self.ts_primary_rb)
-        ts_row.addWidget(self.ts_secondary_rb)
-        ts_row.addStretch()
-        options_layout.addLayout(ts_row)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
 
-        # Tolerance
-        tol_row = QHBoxLayout()
-        self.tol_label = QLabel(tr("@merge.tolerance"))
-        tol_row.addWidget(self.tol_label)
+        self.ts_box = SettingBox("")
+        self.ts_group = PillGroup([("", "primary"), ("", "secondary")])
+        self.ts_group.value_changed.connect(self._update_preview)
+        self.ts_box.layout_box.addWidget(self.ts_group)
+        grid.addWidget(self.ts_box, 0, 0)
+
+        self.tolerance_box = SettingBox("")
+        self.tolerance_group = PillGroup([("", "default"), ("", "custom")])
+        self.tolerance_group.value_changed.connect(self._on_tolerance_mode_changed)
+        self.tolerance_box.layout_box.addWidget(self.tolerance_group)
         self.tolerance_spin = QSpinBox()
+        self.tolerance_spin.setObjectName("compact_spin")
         self.tolerance_spin.setRange(0, 9999)
         self.tolerance_spin.setValue(100)
         self.tolerance_spin.setSuffix(" ms")
-        self.tolerance_spin.setMinimumWidth(110)
-        tol_row.addWidget(self.tolerance_spin)
-        tol_row.addStretch()
-        options_layout.addLayout(tol_row)
+        self.tolerance_spin.hide()
+        self.tolerance_spin.valueChanged.connect(self._update_preview)
+        self.tolerance_box.layout_box.addWidget(self.tolerance_spin)
+        grid.addWidget(self.tolerance_box, 0, 1)
 
-        # Ordering
-        self.order_label = QLabel(tr("@merge.ordering"))
-        options_layout.addWidget(self.order_label)
-        self.order_btn_group = QButtonGroup(self)
-        order_row = QHBoxLayout()
-        self.order_pfirst_rb = QRadioButton(tr("@merge.order_pfirst"))
-        self.order_pfirst_rb.setChecked(True)
-        self.order_sfirst_rb = QRadioButton(tr("@merge.order_sfirst"))
-        self.order_btn_group.addButton(self.order_pfirst_rb, 0)
-        self.order_btn_group.addButton(self.order_sfirst_rb, 1)
-        order_row.addWidget(self.order_pfirst_rb)
-        order_row.addWidget(self.order_sfirst_rb)
-        order_row.addStretch()
-        options_layout.addLayout(order_row)
+        self.order_box = SettingBox("")
+        self.order_group = PillGroup([("", "primary_first"), ("", "secondary_first")])
+        self.order_group.value_changed.connect(self._update_preview)
+        self.order_box.layout_box.addWidget(self.order_group)
+        grid.addWidget(self.order_box, 1, 0)
 
-        # Entry count mismatch
-        self.mismatch_label = QLabel(tr("@merge.mismatch_label"))
-        options_layout.addWidget(self.mismatch_label)
-        self.mismatch_btn_group = QButtonGroup(self)
-        mismatch_row = QHBoxLayout()
-        self.mismatch_pad_rb = QRadioButton(tr("@merge.mismatch_pad"))
-        self.mismatch_pad_rb.setChecked(True)
-        self.mismatch_trunc_rb = QRadioButton(tr("@merge.mismatch_trunc"))
-        self.mismatch_btn_group.addButton(self.mismatch_pad_rb, 0)
-        self.mismatch_btn_group.addButton(self.mismatch_trunc_rb, 1)
-        mismatch_row.addWidget(self.mismatch_pad_rb)
-        mismatch_row.addWidget(self.mismatch_trunc_rb)
-        mismatch_row.addStretch()
-        options_layout.addLayout(mismatch_row)
+        self.mismatch_box = SettingBox("")
+        self.mismatch_group = PillGroup([("", "warn_pad"), ("", "truncate")])
+        self.mismatch_group.value_changed.connect(self._update_preview)
+        self.mismatch_box.layout_box.addWidget(self.mismatch_group)
+        grid.addWidget(self.mismatch_box, 1, 1)
 
-        # Header source
-        self.header_label = QLabel(tr("@merge.header_label"))
-        options_layout.addWidget(self.header_label)
-        self.header_btn_group = QButtonGroup(self)
-        header_row = QHBoxLayout()
-        self.header_primary_rb = QRadioButton(tr("@merge.header_primary"))
-        self.header_primary_rb.setChecked(True)
-        self.header_secondary_rb = QRadioButton(tr("@merge.header_secondary"))
-        self.header_btn_group.addButton(self.header_primary_rb, 0)
-        self.header_btn_group.addButton(self.header_secondary_rb, 1)
-        header_row.addWidget(self.header_primary_rb)
-        header_row.addWidget(self.header_secondary_rb)
-        header_row.addStretch()
-        options_layout.addLayout(header_row)
+        self.header_box = SettingBox("")
+        self.header_group = PillGroup([("", "primary"), ("", "secondary")])
+        self.header_group.value_changed.connect(self._update_preview)
+        self.header_box.layout_box.addWidget(self.header_group)
+        grid.addWidget(self.header_box, 2, 0)
 
-        layout.addWidget(self.options_group)
-
-        # Output format
-        fmt_layout = QHBoxLayout()
-        self.fmt_label = QLabel(tr("@merge.output_format"))
-        fmt_layout.addWidget(self.fmt_label)
+        self.format_box = SettingBox("")
         self.fmt_combo = QComboBox()
-        self.fmt_combo.setMinimumWidth(170)
-        self._populate_format_combo()
-        fmt_layout.addWidget(self.fmt_combo)
-        fmt_layout.addStretch()
-        layout.addLayout(fmt_layout)
+        self.fmt_combo.setObjectName("format_combo")
+        self.fmt_combo.currentIndexChanged.connect(self._on_format_changed)
+        self.format_box.layout_box.addWidget(self.fmt_combo)
+        grid.addWidget(self.format_box, 2, 1)
 
-        # --- Preview ---
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
+        layout.addStretch()
+        return card
+
+    def _build_preview_card(self) -> Card:
+        card = Card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QFrame()
+        header.setObjectName("preview_header")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(18, 14, 18, 13)
+        text_col = QVBoxLayout()
+        text_col.setSpacing(3)
+        self.preview_title = QLabel()
+        self.preview_title.setObjectName("preview_title")
+        self.preview_meta = QLabel()
+        self.preview_meta.setObjectName("preview_meta")
+        text_col.addWidget(self.preview_title)
+        text_col.addWidget(self.preview_meta)
+        header_layout.addLayout(text_col)
+        header_layout.addStretch()
+        self.preview_status = StatusPill(tone="neutral")
+        header_layout.addWidget(self.preview_status)
+        layout.addWidget(header)
+
         self.preview_table = PreviewTable()
         layout.addWidget(self.preview_table, 1)
+        return card
 
-        # --- Output path + Execute ---
-        out_layout = QHBoxLayout()
-        self.out_label = QLabel(tr("@merge.output"))
-        out_layout.addWidget(self.out_label)
+    def _build_output_card(self) -> Card:
+        card = Card()
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(16, 13, 16, 13)
+        layout.setSpacing(12)
+
+        path_group = QVBoxLayout()
+        path_group.setSpacing(5)
+        self.output_label = QLabel()
+        self.output_label.setObjectName("small_label")
         self.output_path = QLineEdit()
-        self.output_path.setPlaceholderText(tr("@merge.output_placeholder"))
-        out_layout.addWidget(self.output_path)
-        out_browse = QPushButton("...")
-        out_browse.setFixedWidth(36)
-        out_browse.setStyleSheet("background-color: #45475a; color: #cdd6f4; border-radius: 4px; padding: 4px; font-weight: bold;")
-        out_browse.setCursor(Qt.PointingHandCursor)
-        out_browse.clicked.connect(self._browse_output)
-        out_layout.addWidget(out_browse)
-        layout.addLayout(out_layout)
+        self.output_path.setObjectName("path_field")
+        path_group.addWidget(self.output_label)
+        path_group.addWidget(self.output_path)
+        layout.addLayout(path_group, 1)
 
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        self.merge_btn = QPushButton(tr("@merge.btn_merge"))
-        self.merge_btn.setFixedWidth(140)
+        self.merge_btn = QPushButton()
+        self.merge_btn.setObjectName("primary_button")
+        self.merge_btn.setCursor(Qt.PointingHandCursor)
         self.merge_btn.setEnabled(False)
         self.merge_btn.clicked.connect(self._on_merge)
-        btn_layout.addWidget(self.merge_btn)
-        layout.addLayout(btn_layout)
+        layout.addWidget(self.merge_btn, 0, Qt.AlignBottom)
+        return card
 
-        i18n.language_changed.connect(self._on_language_changed)
-
-    def _on_language_changed(self, lang: str):
-        self.primary_label_w.setText(tr("@merge.primary_label"))
-        self.secondary_label_w.setText(tr("@merge.secondary_label"))
-        self.options_group.setTitle(tr("@merge.options"))
-        self.ts_label.setText(tr("@merge.ts_source"))
-        self.ts_primary_rb.setText(tr("@merge.ts_primary"))
-        self.ts_secondary_rb.setText(tr("@merge.ts_secondary"))
-        self.tol_label.setText(tr("@merge.tolerance"))
-        self.order_label.setText(tr("@merge.ordering"))
-        self.order_pfirst_rb.setText(tr("@merge.order_pfirst"))
-        self.order_sfirst_rb.setText(tr("@merge.order_sfirst"))
-        self.mismatch_label.setText(tr("@merge.mismatch_label"))
-        self.mismatch_pad_rb.setText(tr("@merge.mismatch_pad"))
-        self.mismatch_trunc_rb.setText(tr("@merge.mismatch_trunc"))
-        self.header_label.setText(tr("@merge.header_label"))
-        self.header_primary_rb.setText(tr("@merge.header_primary"))
-        self.header_secondary_rb.setText(tr("@merge.header_secondary"))
-        self.fmt_label.setText(tr("@merge.output_format"))
-        self.out_label.setText(tr("@merge.output"))
-        self.output_path.setPlaceholderText(tr("@merge.output_placeholder"))
-        self.merge_btn.setText(tr("@merge.btn_merge"))
+    def _on_language_changed(self, _lang: str) -> None:
+        self.import_title.setText(tr("@merge.preview_import_title"))
+        self.import_desc.setText(tr("@merge.preview_import_desc"))
+        self.options_title.setText(tr("@merge.preview_options_title"))
+        self.ts_box.set_title(tr("@merge.preview_ts_title"))
+        self.ts_group.set_texts([tr("@merge.preview_primary"), tr("@merge.preview_secondary")])
+        self.tolerance_box.set_title(tr("@merge.preview_tolerance_title"))
+        self.tolerance_group.set_texts([tr("@merge.preview_100ms"), tr("@merge.preview_custom")])
+        self.order_box.set_title(tr("@merge.preview_order_title"))
+        self.order_group.set_texts([tr("@merge.preview_primary_top"), tr("@merge.preview_secondary_top")])
+        self.mismatch_box.set_title(tr("@merge.preview_mismatch_title"))
+        self.mismatch_group.set_texts([tr("@merge.preview_pad"), tr("@merge.preview_truncate")])
+        self.header_box.set_title(tr("@merge.preview_style_title"))
+        self.header_group.set_texts([tr("@merge.preview_primary"), tr("@merge.preview_secondary")])
+        self.format_box.set_title(tr("@merge.preview_format_title"))
+        self.preview_title.setText(tr("@merge.preview_title"))
+        self.output_label.setText(tr("@merge.preview_output"))
+        self.merge_btn.setText(tr("@merge.preview_start"))
         self._populate_format_combo()
-
-        if not self.primary_file:
-            self.primary_info.setText(tr("@merge.no_file"))
-        if not self.secondary_file:
-            self.secondary_info.setText(tr("@merge.no_file"))
-
-    def _populate_format_combo(self):
-        self.fmt_combo.clear()
-        self.fmt_combo.addItems([
-            tr("@merge.same_as_primary"), "SRT", "ASS", "VTT"
-        ])
-
-    def _on_primary_loaded(self, path: str):
-        try:
-            text, enc, nl = read_subtitle_file(path)
-            fmt = detect_format(text)
-            parser = get_parser(fmt)
-            self.primary_file = parser.parse(text)
-            self.primary_file._nl = nl
-            self.primary_info.setText(tr("@merge.format_info", fmt=fmt.name, n=len(self.primary_file.entries)))
-            self.primary_info.setStyleSheet("color: #a6e3a1;")
-            self._check_ready()
-        except Exception as e:
-            self.primary_info.setText(tr("@error.load", msg=str(e)))
-            self.primary_info.setStyleSheet("color: #f38ba8;")
-            self.primary_file = None
-            self.merge_btn.setEnabled(False)
-
-    def _on_secondary_loaded(self, path: str):
-        try:
-            text, enc, nl = read_subtitle_file(path)
-            fmt = detect_format(text)
-            parser = get_parser(fmt)
-            self.secondary_file = parser.parse(text)
-            self.secondary_file._nl = nl
-            self.secondary_info.setText(tr("@merge.format_info", fmt=fmt.name, n=len(self.secondary_file.entries)))
-            self.secondary_info.setStyleSheet("color: #a6e3a1;")
-            self._check_ready()
-        except Exception as e:
-            self.secondary_info.setText(tr("@error.load", msg=str(e)))
-            self.secondary_info.setStyleSheet("color: #f38ba8;")
-            self.secondary_file = None
-            self.merge_btn.setEnabled(False)
-
-    def _check_ready(self):
         if self.primary_file and self.secondary_file:
-            self.merge_btn.setEnabled(True)
-            if not self.output_path.text().strip():
-                ext_map = {SubtitleFormat.SRT: ".srt", SubtitleFormat.ASS: ".ass", SubtitleFormat.SSA: ".ass", SubtitleFormat.VTT: ".vtt"}
-                ext = ext_map.get(self.primary_file.format, ".srt")
-                base = self.primary_drop.file_path.rsplit(".", 1)[0] if "." in self.primary_drop.file_path else "merged"
-                self.output_path.setText(f"{base}_bilingual{ext}")
             self._update_preview()
+        else:
+            self._refresh_preview_header()
 
-    def _update_preview(self):
+    def _populate_format_combo(self) -> None:
+        previous_data = self.fmt_combo.currentData() if self.fmt_combo.count() else None
+        self.fmt_combo.blockSignals(True)
+        self.fmt_combo.clear()
+        self.fmt_combo.addItem(tr("@merge.same_as_primary"), None)
+        for name in ("SRT", "ASS", "SSA", "VTT"):
+            self.fmt_combo.addItem(name, name)
+        index = self.fmt_combo.findData(previous_data)
+        self.fmt_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.fmt_combo.blockSignals(False)
+
+    def _load_subtitle(self, path: str) -> tuple[SubtitleFile, str, str]:
+        text, encoding, newline = read_subtitle_file(path)
+        fmt = detect_format(text)
+        parser = get_parser(fmt)
+        subtitle = parser.parse(text)
+        if not subtitle.entries:
+            raise ValueError(tr("@error.no_entries"))
+        subtitle._nl = newline
+        return subtitle, fmt.name, encoding
+
+    def _on_primary_loaded(self, path: str) -> None:
+        try:
+            subtitle, fmt, encoding = self._load_subtitle(path)
+        except Exception as exc:
+            self.primary_drop.restore_state()
+            QMessageBox.warning(self, tr("@merge.preview_load_failed"), tr("@error.load", msg=str(exc)))
+            return
+
+        self.primary_file = subtitle
+        self.primary_path = path
+        self.primary_encoding = encoding
+        self.primary_drop.set_loaded_metadata(
+            path,
+            fmt,
+            tr("@merge.preview_compact_meta", fmt=fmt, count=len(subtitle.entries)),
+        )
+        self._check_ready()
+
+    def _on_secondary_loaded(self, path: str) -> None:
+        try:
+            subtitle, fmt, encoding = self._load_subtitle(path)
+        except Exception as exc:
+            self.secondary_drop.restore_state()
+            QMessageBox.warning(self, tr("@merge.preview_load_failed"), tr("@error.load", msg=str(exc)))
+            return
+
+        self.secondary_file = subtitle
+        self.secondary_path = path
+        self.secondary_encoding = encoding
+        self.secondary_drop.set_loaded_metadata(
+            path,
+            fmt,
+            tr("@merge.preview_compact_meta", fmt=fmt, count=len(subtitle.entries)),
+        )
+        self._check_ready()
+
+    def _check_ready(self) -> None:
+        ready = bool(self.primary_file and self.secondary_file)
+        self.merge_btn.setEnabled(ready)
+        self.ready_summary.setVisible(ready)
+        if not ready:
+            self.preview_table.clear_preview()
+            self._refresh_preview_header()
+            return
+        self._update_default_output_path()
+        self._update_preview()
+        self.status_message.emit(tr("@merge.preview_ready_status"))
+
+    def _on_tolerance_mode_changed(self, mode) -> None:
+        self.tolerance_spin.setVisible(mode == "custom")
+        self._update_preview()
+
+    def _selected_tolerance(self) -> int:
+        return self.tolerance_spin.value() if self.tolerance_group.value() == "custom" else 100
+
+    def _update_preview(self, *_args) -> None:
         if not self.primary_file or not self.secondary_file:
             self.preview_table.clear_preview()
+            self._refresh_preview_header()
+            return
+        result = merge(
+            self.primary_file,
+            self.secondary_file,
+            timestamp_source=self.ts_group.value() or "primary",
+            ordering=self.order_group.value() or "primary_first",
+            on_entry_count_mismatch=self.mismatch_group.value() or "warn_pad",
+            timestamp_tolerance_ms=self._selected_tolerance(),
+            header_source=self.header_group.value() or "primary",
+        )
+        self._last_result = result
+        self.preview_table.show_merge_preview(
+            self.primary_file.entries,
+            self.secondary_file.entries,
+            result.conflicts,
+        )
+        total = max(len(self.primary_file.entries), len(self.secondary_file.entries), 1)
+        conflict_indices = {item[0] for item in result.conflicts}
+        match_rate = max(0.0, (total - len(conflict_indices)) / total * 100)
+        self.ready_summary.set_file(
+            tr("@merge.preview_ready_title"),
+            tr(
+                "@merge.preview_ready_meta",
+                primary=len(self.primary_file.entries),
+                secondary=len(self.secondary_file.entries),
+                rate=f"{match_rate:.1f}",
+            ),
+        )
+        self._refresh_preview_header(len(conflict_indices), match_rate)
+
+    def _refresh_preview_header(self, conflicts: int = 0, rate: float = 0.0) -> None:
+        if not self.primary_file or not self.secondary_file:
+            self.preview_meta.setText(tr("@merge.preview_empty_meta"))
+            self.preview_status.setText(tr("@merge.preview_waiting"))
+            self.preview_status.set_tone("neutral")
             return
 
-        result = merge(
-            self.primary_file, self.secondary_file,
-            timestamp_source="primary",
-            ordering="primary_first",
-            on_entry_count_mismatch="warn_pad",
-            timestamp_tolerance_ms=self.tolerance_spin.value(),
-            header_source="primary",
-        )
+        total = max(len(self.primary_file.entries), len(self.secondary_file.entries))
+        meta = tr("@merge.preview_meta", count=total, conflicts=conflicts)
+        if self.preview_table.is_truncated:
+            meta += " · " + tr("@table.preview_limited_short", limit=self.preview_table.visible_entry_count)
+        self.preview_meta.setText(meta)
+        self.preview_status.setText(tr("@merge.preview_rate", rate=f"{rate:.1f}"))
+        self.preview_status.set_tone("warning" if conflicts else "success")
 
-        self.preview_table.show_merge_preview(
-            self.primary_file.entries, self.secondary_file.entries, result.conflicts,
-        )
+    def _resolve_output_format(self) -> SubtitleFormat:
+        if not self.primary_file:
+            return SubtitleFormat.SRT
+        choice = self.fmt_combo.currentData()
+        if not choice:
+            return self.primary_file.format
+        try:
+            return SubtitleFormat[choice]
+        except KeyError:
+            return self.primary_file.format
 
-    def _browse_output(self):
+    def _output_extension(self) -> str:
+        return {
+            SubtitleFormat.SRT: ".srt",
+            SubtitleFormat.ASS: ".ass",
+            SubtitleFormat.SSA: ".ssa",
+            SubtitleFormat.VTT: ".vtt",
+        }.get(self._resolve_output_format(), ".srt")
+
+    def _on_format_changed(self, _index: int) -> None:
+        if self._output_path_custom and self.output_path.text().strip():
+            normalized = ensure_extension(self.output_path.text().strip(), self._output_extension())
+            self.output_path.blockSignals(True)
+            self.output_path.setText(normalized)
+            self.output_path.blockSignals(False)
+        else:
+            self._update_default_output_path()
+
+    def _mark_output_custom(self, _text: str) -> None:
+        self._output_path_custom = True
+
+    def _update_default_output_path(self) -> None:
+        if self._output_path_custom or not self.primary_file or not self.primary_path:
+            return
+        base, _ = os.path.splitext(self.primary_path)
+        suffix = tr("@merge.preview_output_suffix")
+        self.output_path.setText(f"{base}_{suffix}{self._output_extension()}")
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.output_path and event.type() == QEvent.MouseButtonDblClick:
+            self._browse_output()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _browse_output(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save merged file as", "",
-            tr("@drop.file_filter")
+            self,
+            tr("@merge.preview_choose_output"),
+            self.output_path.text(),
+            tr("@drop.file_filter"),
         )
         if path:
-            self.output_path.setText(path)
+            self.output_path.setText(ensure_extension(path, self._output_extension()))
+            self._output_path_custom = True
 
-    def _on_merge(self):
+    def _validate_output_path(self, output_path: str) -> bool:
+        if not output_path:
+            QMessageBox.warning(self, tr("@merge.missing_path_title"), tr("@merge.missing_path_msg"))
+            return False
+        if paths_equal(output_path, self.primary_path) or paths_equal(output_path, self.secondary_path):
+            QMessageBox.warning(self, tr("@error.output_path_title"), tr("@error.output_overwrites_source"))
+            return False
+        return True
+
+    def _on_merge(self) -> None:
         if not self.primary_file or not self.secondary_file:
             return
 
-        out_path = self.output_path.text().strip()
-        if not out_path:
-            QMessageBox.warning(self, tr("@merge.missing_path_title"), tr("@merge.missing_path_msg"))
+        output_path = ensure_extension(self.output_path.text().strip(), self._output_extension())
+        if not self._validate_output_path(output_path):
+            return
+        self.output_path.setText(output_path)
+
+        try:
+            result = merge(
+                self.primary_file,
+                self.secondary_file,
+                timestamp_source=self.ts_group.value() or "primary",
+                ordering=self.order_group.value() or "primary_first",
+                on_entry_count_mismatch=self.mismatch_group.value() or "warn_pad",
+                timestamp_tolerance_ms=self._selected_tolerance(),
+                header_source=self.header_group.value() or "primary",
+            )
+            out_fmt = self._resolve_output_format()
+            result.merged_file.format = out_fmt
+            if out_fmt not in (SubtitleFormat.ASS, SubtitleFormat.SSA):
+                for entry in result.merged_file.entries:
+                    entry.lines = [strip_ass_tags(line) for line in entry.lines]
+            parser = get_parser(out_fmt)
+            newline = getattr(self.primary_file, "_nl", "\r\n")
+            write_subtitle_file(
+                output_path,
+                parser.write(result.merged_file),
+                encoding=self.primary_encoding,
+                newline=newline,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, tr("@error.write_title"), tr("@error.write_failed", msg=str(exc)))
+            self.status_message.emit(tr("@error.write_failed", msg=str(exc)))
             return
 
-        ts_src = "primary" if self.ts_primary_rb.isChecked() else "secondary"
-        ordering = "primary_first" if self.order_pfirst_rb.isChecked() else "secondary_first"
-        mm = "warn_pad" if self.mismatch_pad_rb.isChecked() else "truncate"
-        tol = self.tolerance_spin.value()
-        header_src = "primary" if self.header_primary_rb.isChecked() else "secondary"
-
-        result = merge(
-            self.primary_file, self.secondary_file,
-            timestamp_source=ts_src, ordering=ordering,
-            on_entry_count_mismatch=mm, timestamp_tolerance_ms=tol,
-            header_source=header_src,
-        )
-
-        fmt_choice = self.fmt_combo.currentText()
-        if fmt_choice == tr("@merge.same_as_primary") or fmt_choice == "Same as primary":
-            out_fmt = self.primary_file.format
-        else:
-            try:
-                out_fmt = SubtitleFormat[fmt_choice]
-            except KeyError:
-                out_fmt = self.primary_file.format
-
-        result.merged_file.format = out_fmt
-
-        # Strip ASS style override tags when outputting to non-ASS formats
-        if out_fmt not in (SubtitleFormat.ASS, SubtitleFormat.SSA):
-            for entry in result.merged_file.entries:
-                entry.lines = [strip_ass_tags(line) for line in entry.lines]
-
-        parser_cls = get_parser(out_fmt)
-        text = parser_cls.write(result.merged_file)
-        nl = getattr(self.primary_file, "_nl", "\r\n")
-        write_subtitle_file(out_path, text, newline=nl)
-
-        msg = tr("@merge.complete_msg", path=out_path)
+        message = tr("@merge.complete_msg", path=output_path)
         if result.conflicts:
-            msg += "\n\n" + tr("@merge.warnings", n=len(result.conflicts))
-            for idx, ctype, detail in result.conflicts[:5]:
-                msg += tr("@merge.conflict_entry", idx=idx, ctype=ctype.name, detail=detail)
+            message += "\n\n" + tr("@merge.warnings", n=len(result.conflicts))
+            for idx, conflict_type, detail in result.conflicts[:5]:
+                message += tr(
+                    "@merge.conflict_entry",
+                    idx=idx,
+                    ctype=conflict_type.name,
+                    detail=detail,
+                )
             if len(result.conflicts) > 5:
-                msg += tr("@merge.conflict_more", n=len(result.conflicts) - 5)
-        QMessageBox.information(self, tr("@merge.complete_title"), msg)
-        self.status_message.emit(tr("@merge.status_done", path=out_path, n=len(result.conflicts)))
+                message += tr("@merge.conflict_more", n=len(result.conflicts) - 5)
+        QMessageBox.information(self, tr("@merge.complete_title"), message)
+        self.status_message.emit(tr("@merge.status_done", path=output_path, n=len(result.conflicts)))

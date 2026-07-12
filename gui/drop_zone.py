@@ -1,165 +1,148 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QHBoxLayout, QFileDialog, QFrame
-from PySide6.QtCore import Signal, Qt
+from __future__ import annotations
+
+import os
+
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
+from PySide6.QtWidgets import QFileDialog, QFrame, QLabel, QPushButton, QVBoxLayout
 
 from gui.i18n import i18n, tr
+from gui.ui_components import repolish
 
 
-class DropZone(QWidget):
+class DropZone(QFrame):
     file_changed = Signal(str)
 
-    def __init__(self, label_key: str = "@sep.drop_label"):
+    def __init__(
+        self,
+        label_key: str = "@sep.drop_label",
+        *,
+        compact: bool = False,
+        badge_text: str = "SRT",
+        replace_content_on_load: bool = False,
+    ):
         super().__init__()
+        self.setObjectName("drop_zone")
         self.setAcceptDrops(True)
-        self.setMinimumHeight(96)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setProperty("state", "idle")
+        self.setProperty("compact", compact)
         self._label_key = label_key
-        self._has_file = False
+        self._compact = compact
+        self._file_path = ""
+        self._badge_text = badge_text
+        self._default_badge_text = badge_text
+        self._replace_content_on_load = replace_content_on_load
 
+        self.setMinimumHeight(112 if compact else 158)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setContentsMargins(12, 11, 12, 11)
+        layout.setSpacing(4 if compact else 5)
+        layout.setAlignment(Qt.AlignCenter)
 
-        # Drop target card
-        self.drop_card = QFrame()
-        self.drop_card.setAcceptDrops(True)
-        self.drop_card.setMinimumHeight(60)
-        self._idle_style = (
-            "QFrame {"
-            "  background-color: #252836;"
-            "  border: 2px dashed #45475a;"
-            "  border-radius: 10px;"
-            "}"
-        )
-        self._hover_style = (
-            "QFrame {"
-            "  background-color: #2a3040;"
-            "  border: 2px dashed #89b4fa;"
-            "  border-radius: 10px;"
-            "}"
-        )
-        self._file_loaded_style = (
-            "QFrame {"
-            "  background-color: #252836;"
-            "  border: 2px solid #3d4057;"
-            "  border-radius: 10px;"
-            "}"
-        )
-        self.drop_card.setStyleSheet(self._idle_style)
+        self.icon_label = QLabel(badge_text)
+        self.icon_label.setObjectName("file_icon")
+        self.icon_label.setProperty("compact", compact)
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        self.icon_label.setFixedSize(35, 42) if compact else self.icon_label.setFixedSize(48, 56)
+        layout.addWidget(self.icon_label, 0, Qt.AlignCenter)
 
-        card_layout = QVBoxLayout(self.drop_card)
-        card_layout.setAlignment(Qt.AlignCenter)
-        card_layout.setSpacing(4)
+        self.main_label = QLabel(tr(label_key))
+        self.main_label.setObjectName("drop_main")
+        self.main_label.setAlignment(Qt.AlignCenter)
+        self.main_label.setWordWrap(True)
+        layout.addWidget(self.main_label)
 
-        self.drop_icon = QLabel("+")
-        self.drop_icon.setAlignment(Qt.AlignCenter)
-        self.drop_icon.setStyleSheet(
-            "color: #585b70; font-size: 22px; font-weight: 300;"
-            "background: transparent; border: none;"
-        )
-        card_layout.addWidget(self.drop_icon)
+        self.hint_label = QLabel(tr("@drop.hint"))
+        self.hint_label.setObjectName("drop_hint")
+        self.hint_label.setAlignment(Qt.AlignCenter)
+        self.hint_label.setWordWrap(True)
+        layout.addWidget(self.hint_label)
 
-        self.drop_label = QLabel(tr(label_key))
-        self.drop_label.setAlignment(Qt.AlignCenter)
-        self.drop_label.setStyleSheet(
-            "color: #6c7086; font-size: 13px;"
-            "background: transparent; border: none;"
-        )
-        card_layout.addWidget(self.drop_label)
-
-        self.drop_hint = QLabel(tr("@drop.hint"))
-        self.drop_hint.setAlignment(Qt.AlignCenter)
-        self.drop_hint.setStyleSheet(
-            "color: #585b70; font-size: 11px;"
-            "background: transparent; border: none;"
-        )
-        card_layout.addWidget(self.drop_hint)
-
-        layout.addWidget(self.drop_card)
-
-        # Path + Browse row
-        path_row = QHBoxLayout()
-        path_row.setSpacing(8)
-
-        self.path_edit = QLineEdit()
-        self.path_edit.setReadOnly(True)
-        self._update_placeholder()
-        path_row.addWidget(self.path_edit)
-
-        self.browse_btn = QPushButton(tr("@drop.browse"))
+        self.browse_btn = QPushButton(tr("@convert.choose_file"))
+        self.browse_btn.setObjectName("mini_button")
+        self.browse_btn.setCursor(Qt.PointingHandCursor)
         self.browse_btn.clicked.connect(self._browse)
-        self.browse_btn.setFixedWidth(80)
-        path_row.addWidget(self.browse_btn)
-
-        layout.addLayout(path_row)
+        self.browse_btn.setVisible(not compact)
+        layout.addWidget(self.browse_btn, 0, Qt.AlignCenter)
 
         i18n.language_changed.connect(self._on_language_changed)
 
-    def _on_language_changed(self, lang: str):
-        self.drop_label.setText(tr(self._label_key))
-        self.drop_hint.setText(tr("@drop.hint"))
-        self._update_placeholder()
-        self.browse_btn.setText(tr("@drop.browse"))
+    def _on_language_changed(self, _lang: str) -> None:
+        if not (self._replace_content_on_load and self._file_path):
+            self.main_label.setText(tr(self._label_key))
+            self.hint_label.setText(tr("@drop.hint"))
+        self.browse_btn.setText(tr("@convert.choose_file"))
 
-    def _update_placeholder(self):
-        self.path_edit.setPlaceholderText(tr("@drop.no_file"))
+    def set_badge(self, text: str) -> None:
+        self._badge_text = text
+        self.icon_label.setText(text)
 
-    def _set_file_loaded_state(self):
-        self._has_file = True
-        self.drop_card.setStyleSheet(self._file_loaded_style)
-        self.drop_icon.setStyleSheet(
-            "color: #a6e3a1; font-size: 22px; font-weight: 300;"
-            "background: transparent; border: none;"
-        )
-        self.drop_icon.setText("✓")
+    def set_loaded_metadata(self, path: str, badge: str | None = None, meta: str = "") -> None:
+        """Commit a file as loaded after the owner parsed it successfully."""
+        self._file_path = path
+        if badge:
+            self.set_badge(badge)
+        self._set_state("loaded")
+        if self._replace_content_on_load:
+            self.main_label.setText(os.path.basename(path))
+            self.hint_label.setText(meta or path)
 
-    def _set_empty_state(self):
-        self._has_file = False
-        self.drop_card.setStyleSheet(self._idle_style)
-        self.drop_icon.setStyleSheet(
-            "color: #585b70; font-size: 22px; font-weight: 300;"
-            "background: transparent; border: none;"
-        )
-        self.drop_icon.setText("+")
+    def restore_state(self) -> None:
+        self._set_state("loaded" if self._file_path else "idle")
 
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
+    def _set_state(self, state: str) -> None:
+        self.setProperty("state", state)
+        repolish(self)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()):
             event.acceptProposedAction()
-            self.drop_card.setStyleSheet(self._hover_style)
-            self.drop_icon.setStyleSheet(
-                "color: #89b4fa; font-size: 22px; font-weight: 300;"
-                "background: transparent; border: none;"
-            )
-
-    def dragLeaveEvent(self, event):
-        if self._has_file:
-            self._set_file_loaded_state()
+            self._set_state("hover")
         else:
-            self._set_empty_state()
+            event.ignore()
 
-    def dropEvent(self, event: QDropEvent):
-        urls = event.mimeData().urls()
-        if urls:
-            path = urls[0].toLocalFile()
-            self.path_edit.setText(path)
-            self._set_file_loaded_state()
-            self.file_changed.emit(path)
-        else:
-            self._set_empty_state()
+    def dragLeaveEvent(self, event) -> None:
+        self.restore_state()
+        super().dragLeaveEvent(event)
 
-    def _browse(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, tr("@drop.select_title"), "",
-            tr("@drop.file_filter")
+    def dropEvent(self, event: QDropEvent) -> None:
+        path = next(
+            (url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()),
+            "",
         )
         if path:
-            self.path_edit.setText(path)
-            self._set_file_loaded_state()
+            self.restore_state()
+            self.file_changed.emit(path)
+            event.acceptProposedAction()
+        else:
+            self.restore_state()
+            event.ignore()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._browse()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _browse(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("@drop.select_title"),
+            os.path.dirname(self._file_path) if self._file_path else "",
+            tr("@drop.file_filter"),
+        )
+        if path:
             self.file_changed.emit(path)
 
     @property
     def file_path(self) -> str:
-        return self.path_edit.text()
+        return self._file_path
 
-    def clear(self):
-        self.path_edit.clear()
-        self._set_empty_state()
+    def clear(self) -> None:
+        self._file_path = ""
+        self.set_badge(self._default_badge_text)
+        self.main_label.setText(tr(self._label_key))
+        self.hint_label.setText(tr("@drop.hint"))
+        self._set_state("idle")
