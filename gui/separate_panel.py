@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtWidgets import (
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from gui.drop_zone import DropZone
 from gui.i18n import i18n, tr
+import gui.i18n_extra  # noqa: F401
 from gui.preview_table import PreviewTable
 from gui.ui_components import Card, FileSummary, StatusPill, ToggleSwitch
 from language.detector import (
@@ -30,7 +32,13 @@ from logic.separator import separate
 from models.entry import SubtitleFile
 from models.enums import SubtitleFormat
 from parsers.base import detect_format, get_parser
-from utils.text import read_subtitle_file, strip_ass_tags, write_subtitle_file
+from utils.text import (
+    PendingWrite,
+    paths_equal,
+    read_subtitle_file,
+    strip_ass_tags,
+    write_subtitle_files_atomically,
+)
 
 
 class SeparatePanel(QWidget):
@@ -45,6 +53,8 @@ class SeparatePanel(QWidget):
         self.original_encoding = "utf-8"
         self.detected_assignment: dict[int, LanguageGroup] = {}
         self._input_path = ""
+        self._lang1_path_custom = False
+        self._lang2_path_custom = False
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -70,6 +80,8 @@ class SeparatePanel(QWidget):
 
         self.lang1_path.installEventFilter(self)
         self.lang2_path.installEventFilter(self)
+        self.lang1_path.textEdited.connect(lambda _text: self._set_path_custom(1))
+        self.lang2_path.textEdited.connect(lambda _text: self._set_path_custom(2))
         i18n.language_changed.connect(self._on_language_changed)
         self._on_language_changed(i18n.current_lang)
 
@@ -238,14 +250,20 @@ class SeparatePanel(QWidget):
         self.separate_btn.setText(tr("@sep.preview_start"))
         self._populate_format_combo()
         self._refresh_language_ui()
-        self._refresh_preview_header()
+        if self.sub_file:
+            self._update_default_paths()
+            self._update_preview()
+        else:
+            self._refresh_preview_header()
 
     def _populate_format_combo(self) -> None:
-        previous = self.fmt_combo.currentText() if self.fmt_combo.count() else ""
+        previous_data = self.fmt_combo.currentData() if self.fmt_combo.count() else None
         self.fmt_combo.blockSignals(True)
         self.fmt_combo.clear()
-        self.fmt_combo.addItems([tr("@sep.same_as_input"), "SRT", "ASS", "VTT"])
-        index = self.fmt_combo.findText(previous)
+        self.fmt_combo.addItem(tr("@sep.same_as_input"), None)
+        for name in ("SRT", "ASS", "SSA", "VTT"):
+            self.fmt_combo.addItem(name, name)
+        index = self.fmt_combo.findData(previous_data)
         self.fmt_combo.setCurrentIndex(index if index >= 0 else 0)
         self.fmt_combo.blockSignals(False)
 
@@ -270,34 +288,37 @@ class SeparatePanel(QWidget):
             text, encoding, newline = read_subtitle_file(path)
             fmt = detect_format(text)
             parser = get_parser(fmt)
-            self.sub_file = parser.parse(text)
-            self._input_path = path
-            self.original_encoding = encoding
-            self.original_nl = newline
-            count = len(self.sub_file.entries)
-            self.drop_zone.set_loaded_metadata(path, fmt.name)
-            self.file_summary.set_file(
-                os.path.basename(path),
-                tr("@sep.preview_file_meta", fmt=fmt.name, count=count, encoding=encoding.upper()),
-            )
-            self.file_summary.show()
-            self.separate_btn.setEnabled(True)
-            if self.auto_toggle.isChecked():
-                self._run_auto_detect()
-            else:
-                self.detected_assignment = {}
-                self.lang1_line, self.lang2_line = 0, 1
-            self._update_default_paths()
-            self._update_preview()
-            self.status_message.emit(tr("@sep.preview_loaded_status", count=count))
+            subtitle = parser.parse(text)
+            if not subtitle.entries:
+                raise ValueError(tr("@error.no_entries"))
         except Exception as exc:
-            self.sub_file = None
-            self.separate_btn.setEnabled(False)
-            self.file_summary.hide()
-            self.preview_table.clear_preview()
-            self.preview_status.setText(tr("@sep.preview_load_failed"))
-            self.preview_status.set_tone("danger")
+            self.drop_zone.restore_state()
             QMessageBox.warning(self, tr("@sep.preview_load_failed"), tr("@error.load", msg=str(exc)))
+            return
+
+        self.sub_file = subtitle
+        self._input_path = path
+        self.original_encoding = encoding
+        self.original_nl = newline
+        self._lang1_path_custom = False
+        self._lang2_path_custom = False
+        self.drop_zone.set_loaded_metadata(path, fmt.name)
+        self.file_summary.set_file(
+            os.path.basename(path),
+            tr("@sep.preview_file_meta", fmt=fmt.name, count=len(subtitle.entries), encoding=encoding.upper()),
+        )
+        self.file_summary.show()
+        self.separate_btn.setEnabled(True)
+
+        if self.auto_toggle.isChecked():
+            self._run_auto_detect()
+        else:
+            self.detected_assignment = {}
+            self.lang1_line, self.lang2_line = 0, 1
+
+        self._update_default_paths(force=True)
+        self._update_preview()
+        self.status_message.emit(tr("@sep.preview_loaded_status", count=len(subtitle.entries)))
 
     def _run_auto_detect(self) -> None:
         if not self.sub_file:
@@ -317,6 +338,10 @@ class SeparatePanel(QWidget):
         self.lang2_chip.setEnabled(not checked)
         if checked and self.sub_file:
             self._run_auto_detect()
+        elif not checked:
+            self.detected_assignment = {}
+            self.lang1_line, self.lang2_line = 0, 1
+            self._refresh_language_ui()
         self._update_default_paths()
         self._update_preview()
 
@@ -334,9 +359,11 @@ class SeparatePanel(QWidget):
             self.preview_status.setText(tr("@sep.preview_waiting"))
             self.preview_status.set_tone("neutral")
             return
-        count = len(self.sub_file.entries)
+
         mode = tr("@sep.preview_auto_success") if self.auto_toggle.isChecked() else tr("@sep.preview_manual_mode")
-        self.preview_meta.setText(tr("@sep.preview_meta", count=count, mode=mode))
+        if self.preview_table.is_truncated:
+            mode += " · " + tr("@table.preview_limited_short", limit=self.preview_table.visible_entry_count)
+        self.preview_meta.setText(tr("@sep.preview_meta", count=len(self.sub_file.entries), mode=mode))
         if missing_count:
             self.preview_status.setText(tr("@sep.preview_missing_status", count=missing_count))
             self.preview_status.set_tone("warning")
@@ -349,6 +376,7 @@ class SeparatePanel(QWidget):
             self.preview_table.clear_preview()
             self._refresh_preview_header()
             return
+
         max_line = max(self.lang1_line, self.lang2_line)
         empty = [entry.index for entry in self.sub_file.entries if len(entry.lines) <= max_line]
         name1 = self._language_name(self.detected_assignment.get(self.lang1_line), tr("@sep.language_one"))
@@ -366,70 +394,114 @@ class SeparatePanel(QWidget):
     def _resolve_output_format(self) -> SubtitleFormat:
         if not self.sub_file:
             return SubtitleFormat.SRT
-        choice = self.fmt_combo.currentText()
-        if choice == tr("@sep.same_as_input") or choice == "Same as input":
+        choice = self.fmt_combo.currentData()
+        if not choice:
             return self.sub_file.format
         try:
             return SubtitleFormat[choice]
         except KeyError:
             return self.sub_file.format
 
-    def _update_default_paths(self) -> None:
+    def _safe_suffix(self, value: str, fallback: str) -> str:
+        cleaned = re.sub(r'[<>:"/\\|?*]+', "_", value).strip(" ._")
+        return cleaned or fallback
+
+    def _update_default_paths(self, force: bool = False) -> None:
         if not self._input_path or not self.sub_file:
             return
-        out_fmt = self._resolve_output_format()
-        ext_map = {
+        extension = {
             SubtitleFormat.SRT: ".srt",
             SubtitleFormat.ASS: ".ass",
             SubtitleFormat.SSA: ".ssa",
             SubtitleFormat.VTT: ".vtt",
-        }
-        ext = ext_map.get(out_fmt, ".srt")
+        }.get(self._resolve_output_format(), ".srt")
         base, _ = os.path.splitext(self._input_path)
-        name1 = self._language_name(self.detected_assignment.get(self.lang1_line), tr("@sep.language_one"))
-        name2 = self._language_name(self.detected_assignment.get(self.lang2_line), tr("@sep.language_two"))
-        self.lang1_path.setText(f"{base}_{name1}{ext}")
-        self.lang2_path.setText(f"{base}_{name2}{ext}")
+        name1 = self._safe_suffix(
+            self._language_name(self.detected_assignment.get(self.lang1_line), tr("@sep.language_one")),
+            "lang1",
+        )
+        name2 = self._safe_suffix(
+            self._language_name(self.detected_assignment.get(self.lang2_line), tr("@sep.language_two")),
+            "lang2",
+        )
+
+        if force or not self._lang1_path_custom:
+            self.lang1_path.setText(f"{base}_{name1}{extension}")
+        if force or not self._lang2_path_custom:
+            self.lang2_path.setText(f"{base}_{name2}{extension}")
         self._refresh_language_ui()
+
+    def _set_path_custom(self, slot: int) -> None:
+        if slot == 1:
+            self._lang1_path_custom = True
+        else:
+            self._lang2_path_custom = True
 
     def _on_output_format_changed(self, _index: int) -> None:
         self._update_default_paths()
 
     def eventFilter(self, watched, event) -> bool:
         if event.type() == QEvent.MouseButtonDblClick and watched in (self.lang1_path, self.lang2_path):
-            suffix = "lang1" if watched is self.lang1_path else "lang2"
-            self._browse_output(watched, suffix)
+            slot = 1 if watched is self.lang1_path else 2
+            self._browse_output(watched, slot)
             return True
         return super().eventFilter(watched, event)
 
-    def _browse_output(self, line_edit: QLineEdit, suffix: str) -> None:
+    def _browse_output(self, line_edit: QLineEdit, slot: int) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self,
-            tr("@sep.preview_choose_output", language=suffix),
+            tr("@sep.preview_choose_output", language=str(slot)),
             line_edit.text(),
             tr("@drop.file_filter"),
         )
         if path:
             line_edit.setText(path)
+            self._set_path_custom(slot)
+
+    def _validate_output_paths(self, path1: str, path2: str) -> bool:
+        if not path1 or not path2:
+            QMessageBox.warning(self, tr("@sep.missing_path_title"), tr("@sep.missing_path_msg"))
+            return False
+        if paths_equal(path1, path2):
+            QMessageBox.warning(self, tr("@error.output_path_title"), tr("@error.outputs_must_differ"))
+            return False
+        if paths_equal(path1, self._input_path) or paths_equal(path2, self._input_path):
+            QMessageBox.warning(self, tr("@error.output_path_title"), tr("@error.output_overwrites_source"))
+            return False
+        return True
 
     def _on_separate(self) -> None:
         if not self.sub_file:
             return
+
         path1 = self.lang1_path.text().strip()
         path2 = self.lang2_path.text().strip()
-        if not path1 or not path2:
-            QMessageBox.warning(self, tr("@sep.missing_path_title"), tr("@sep.missing_path_msg"))
+        if not self._validate_output_paths(path1, path2):
             return
-        result = separate(self.sub_file, self.lang1_line, self.lang2_line)
-        out_fmt = self._resolve_output_format()
-        if out_fmt not in (SubtitleFormat.ASS, SubtitleFormat.SSA):
+
+        try:
+            result = separate(self.sub_file, self.lang1_line, self.lang2_line)
+            out_fmt = self._resolve_output_format()
+            if out_fmt not in (SubtitleFormat.ASS, SubtitleFormat.SSA):
+                for subtitle_file in (result.lang1_file, result.lang2_file):
+                    for entry in subtitle_file.entries:
+                        entry.lines = [strip_ass_tags(line) for line in entry.lines]
+
+            parser = get_parser(out_fmt)
             for subtitle_file in (result.lang1_file, result.lang2_file):
-                for entry in subtitle_file.entries:
-                    entry.lines = [strip_ass_tags(line) for line in entry.lines]
-        parser = get_parser(out_fmt)
-        for path, subtitle_file in ((path1, result.lang1_file), (path2, result.lang2_file)):
-            subtitle_file.format = out_fmt
-            write_subtitle_file(path, parser.write(subtitle_file), newline=self.original_nl)
+                subtitle_file.format = out_fmt
+
+            text1 = parser.write(result.lang1_file)
+            text2 = parser.write(result.lang2_file)
+            write_subtitle_files_atomically([
+                PendingWrite(path=path1, text=text1, encoding=self.original_encoding, newline=self.original_nl),
+                PendingWrite(path=path2, text=text2, encoding=self.original_encoding, newline=self.original_nl),
+            ])
+        except Exception as exc:
+            QMessageBox.critical(self, tr("@error.write_title"), tr("@error.write_failed", msg=str(exc)))
+            self.status_message.emit(tr("@error.write_failed", msg=str(exc)))
+            return
+
         message = tr("@sep.complete_msg", path1=path1, path2=path2)
         if result.empty_entries:
             message += "\n\n" + tr("@sep.warn_missing", n=len(result.empty_entries))
