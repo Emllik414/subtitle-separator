@@ -1,25 +1,20 @@
-import sys
 import os
+import sys
 
-# Ensure local modules are importable
+# Ensure local modules are importable.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon
 
+import gui.i18n_extra  # Register additional validation copy.
 from gui.main_window import MainWindow
 
 
 def main():
+    # Qt 6 enables high-DPI scaling automatically. Legacy AA_* attributes do
+    # not need to be changed after QApplication has already been created.
     app = QApplication(sys.argv)
     app.setApplicationName("Bilingual Subtitle Tool")
-
-    # Enable high DPI scaling
-    if hasattr(Qt, "AA_EnableHighDpiScaling"):
-        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    if hasattr(Qt, "AA_UseHighDpiPixmaps"):
-        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
     window = MainWindow()
     window.show()
