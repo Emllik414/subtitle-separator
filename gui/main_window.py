@@ -1,4 +1,7 @@
-from PySide6.QtWidgets import QMainWindow, QTabWidget, QStatusBar, QLabel, QComboBox, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QMainWindow, QTabWidget, QStatusBar, QLabel, QComboBox,
+    QHBoxLayout, QVBoxLayout, QWidget, QPushButton,
+)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
@@ -13,69 +16,85 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(tr("@window.title"))
-        self.resize(1060, 920)
-        self.setMinimumSize(960, 780)
-        self.setStyleSheet(STYLESHEET)
+        self.resize(1120, 860)
+        self.setMinimumSize(980, 760)
 
-        font = QFont("Microsoft YaHei", 10)
+        font = QFont("Segoe UI", 10)
         self.setFont(font)
 
         central = QWidget()
-        central_layout = QVBoxLayout(central)
-        central_layout.setContentsMargins(0, 0, 0, 0)
-        central_layout.setSpacing(0)
+        central.setObjectName("app_root")
+        root_layout = QVBoxLayout(central)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
-        # Language switcher bar
-        lang_bar = QWidget()
-        lang_bar.setFixedHeight(36)
-        lang_bar.setStyleSheet(
-            "background-color: #181825;"
-            "border-bottom: 1px solid #313244;"
-        )
-        lang_layout = QHBoxLayout(lang_bar)
-        lang_layout.setContentsMargins(16, 0, 16, 0)
-        lang_layout.addStretch()
+        top_bar = QWidget()
+        top_bar.setObjectName("top_bar")
+        top_bar.setFixedHeight(64)
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(24, 0, 24, 0)
+        top_layout.setSpacing(12)
 
-        lang_sep = QLabel("|")
-        lang_sep.setStyleSheet("color: #45475a; font-size: 14px; border: none; background: transparent;")
-        lang_layout.addWidget(lang_sep)
+        title_col = QVBoxLayout()
+        title_col.setSpacing(1)
+        self.app_title = QLabel(tr("@window.title"))
+        self.app_title.setObjectName("app_title")
+        self.app_subtitle = QLabel("Subtitle Studio")
+        self.app_subtitle.setObjectName("app_subtitle")
+        title_col.addWidget(self.app_title)
+        title_col.addWidget(self.app_subtitle)
+        top_layout.addLayout(title_col)
+        top_layout.addStretch()
 
-        lang_label = QLabel("  " + tr("@lang.label"))
-        lang_label.setStyleSheet("color: #a6adc8; font-size: 12px; border: none; background: transparent;")
-        lang_label.setObjectName("lang_label")
-        lang_layout.addWidget(lang_label)
+        self.lang_label = QLabel(tr("@lang.label"))
+        self.lang_label.setObjectName("lang_label")
+        top_layout.addWidget(self.lang_label)
 
         self.lang_combo = QComboBox()
         self.lang_combo.addItem("English", "en")
         self.lang_combo.addItem("中文", "zh")
-        self.lang_combo.setFixedWidth(100)
+        self.lang_combo.setFixedWidth(104)
         self.lang_combo.currentIndexChanged.connect(self._on_lang_changed)
-        lang_layout.addWidget(self.lang_combo)
-        central_layout.addWidget(lang_bar)
+        top_layout.addWidget(self.lang_combo)
+        root_layout.addWidget(top_bar)
 
-        # Tab widget
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(24, 18, 24, 18)
+        content_layout.setSpacing(14)
+
         self.tabs = QTabWidget()
-        self.tabs.setContentsMargins(4, 4, 4, 4)
+        self.tabs.setDocumentMode(True)
+        self.tabs.tabBar().setExpanding(False)
+        self.tabs.tabBar().setDrawBase(False)
+
         self.separate_panel = SeparatePanel()
         self.merge_panel = MergePanel()
         self.convert_panel = FormatConvertPanel()
-        self.tabs.addTab(self.separate_panel, "  " + tr("@tab.separate") + "  ")
-        self.tabs.addTab(self.merge_panel, "  " + tr("@tab.merge") + "  ")
-        self.tabs.addTab(self.convert_panel, "  " + tr("@tab.convert") + "  ")
-        central_layout.addWidget(self.tabs)
+        self.tabs.addTab(self.separate_panel, tr("@tab.separate"))
+        self.tabs.addTab(self.merge_panel, tr("@tab.merge"))
+        self.tabs.addTab(self.convert_panel, tr("@tab.convert"))
+        content_layout.addWidget(self.tabs)
+        root_layout.addWidget(content)
 
         self.setCentralWidget(central)
 
-        # Status bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage(tr("@status.ready"))
 
-        # Connect signals
         self.separate_panel.status_message.connect(self.status_bar.showMessage)
         self.merge_panel.status_message.connect(self.status_bar.showMessage)
         self.convert_panel.status_message.connect(self.status_bar.showMessage)
         i18n.language_changed.connect(self._on_language_changed)
+
+        # Existing panels contain legacy local dark styles. Clearing them once lets
+        # the shared light theme control the visual system without changing logic.
+        for widget in central.findChildren(QWidget):
+            if widget.styleSheet():
+                widget.setStyleSheet("")
+
+        self.setStyleSheet(STYLESHEET)
 
     def _on_lang_changed(self, idx: int):
         lang = self.lang_combo.itemData(idx)
@@ -83,9 +102,11 @@ class MainWindow(QMainWindow):
 
     def _on_language_changed(self, lang: str):
         self.setWindowTitle(tr("@window.title"))
-        self.tabs.setTabText(0, "  " + tr("@tab.separate") + "  ")
-        self.tabs.setTabText(1, "  " + tr("@tab.merge") + "  ")
-        self.tabs.setTabText(2, "  " + tr("@tab.convert") + "  ")
+        self.app_title.setText(tr("@window.title"))
+        self.lang_label.setText(tr("@lang.label"))
+        self.tabs.setTabText(0, tr("@tab.separate"))
+        self.tabs.setTabText(1, tr("@tab.merge"))
+        self.tabs.setTabText(2, tr("@tab.convert"))
         self.status_bar.showMessage(tr("@status.ready"))
 
     def closeEvent(self, event):
