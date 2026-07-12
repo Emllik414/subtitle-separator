@@ -1,0 +1,121 @@
+name: Build Windows portable app
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+    paths:
+      - "main.py"
+      - "gui/**"
+      - "logic/**"
+      - "models/**"
+      - "parsers/**"
+      - "utils/**"
+      - "assets/**"
+      - "packaging/**"
+      - "requirements.txt"
+      - ".github/workflows/build-windows-portable.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-portable:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller pillow
+
+      - name: Generate PNG and ICO assets
+        shell: pwsh
+        run: python packaging/generate_icon.py
+
+      - name: Compile and run regression tests
+        shell: pwsh
+        run: |
+          python -m compileall -q .
+          python tests/test_all.py
+
+      - name: Build single-file Windows executable
+        shell: pwsh
+        run: |
+          pyinstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --windowed `
+            --name "SubtitleSeparator" `
+            --icon "assets/app_icon.ico" `
+            --add-data "assets/app_icon.png;assets" `
+            --add-data "assets/app_icon.svg;assets" `
+            --version-file "packaging/version_info.txt" `
+            "main.py"
+
+      - name: Assemble portable ZIP
+        shell: pwsh
+        run: |
+          $portable = "portable/SubtitleSeparator-Windows-Portable"
+          New-Item -ItemType Directory -Path $portable -Force | Out-Null
+          Copy-Item "dist/SubtitleSeparator.exe" "$portable/SubtitleSeparator.exe"
+          Copy-Item "packaging/CreateDesktopShortcut.ps1" "$portable/CreateDesktopShortcut.ps1"
+          Copy-Item "packaging/Create Desktop Shortcut.cmd" "$portable/Create Desktop Shortcut.cmd"
+          Copy-Item "packaging/README-PORTABLE.txt" "$portable/README-PORTABLE.txt"
+
+          $hash = (Get-FileHash "$portable/SubtitleSeparator.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  SubtitleSeparator.exe" | Set-Content "$portable/SHA256.txt" -Encoding utf8
+
+          Compress-Archive `
+            -Path "$portable/*" `
+            -DestinationPath "SubtitleSeparator-Windows-Portable.zip" `
+            -CompressionLevel Optimal `
+            -Force
+
+      - name: Verify package
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/SubtitleSeparator.exe")) {
+            throw "SubtitleSeparator.exe was not created."
+          }
+          if ((Get-Item "dist/SubtitleSeparator.exe").Length -lt 1000000) {
+            throw "SubtitleSeparator.exe is unexpectedly small."
+          }
+          if (-not (Test-Path "SubtitleSeparator-Windows-Portable.zip")) {
+            throw "Portable ZIP was not created."
+          }
+          Get-Item "dist/SubtitleSeparator.exe", "SubtitleSeparator-Windows-Portable.zip" |
+            Select-Object Name, Length
+
+      - name: Upload portable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: SubtitleSeparator-Windows-Portable
+          path: SubtitleSeparator-Windows-Portable.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach package to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SubtitleSeparator-Windows-Portable.zip
+          generate_release_notes: true
