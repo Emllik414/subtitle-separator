@@ -8,10 +8,12 @@ from gui.i18n import tr
 from models.entry import SubtitleEntry
 from utils.time_utils import format_srt_timestamp
 
+
 WARN_COLOR = QBrush(QColor("#b86b00"))
 OK_COLOR = QBrush(QColor("#18843a"))
 MUTED_COLOR = QBrush(QColor("#6f6f75"))
 TEXT_COLOR = QBrush(QColor("#3a3a3f"))
+PREVIEW_ROW_LIMIT = 500
 
 
 class PreviewTable(QTableWidget):
@@ -30,6 +32,12 @@ class PreviewTable(QTableWidget):
         self.setFocusPolicy(Qt.NoFocus)
         self._last_sep_args = None
         self._last_merge_args = None
+        self.total_entry_count = 0
+        self.visible_entry_count = 0
+
+    @property
+    def is_truncated(self) -> bool:
+        return self.total_entry_count > self.visible_entry_count
 
     def show_separation_preview(
         self,
@@ -42,29 +50,47 @@ class PreviewTable(QTableWidget):
     ) -> None:
         self._last_sep_args = (entries, lang1_idx, lang2_idx, empty_entries, line1_title, line2_title)
         self._last_merge_args = None
-        self.clear()
-        self.setColumnCount(5)
-        self.setHorizontalHeaderLabels([
-            tr("@table.index"),
-            tr("@table.timeline"),
-            line1_title or tr("@table.line1"),
-            line2_title or tr("@table.line2"),
-            tr("@table.status"),
-        ])
-        self.setRowCount(len(entries))
-        empty_set = set(empty_entries)
-        for row, entry in enumerate(entries):
-            ts = f"{format_srt_timestamp(entry.start_time)}  →  {format_srt_timestamp(entry.end_time)}"
-            self.setItem(row, 0, _item(str(entry.index), MUTED_COLOR))
-            self.setItem(row, 1, _item(ts, MUTED_COLOR))
-            line1 = entry.lines[lang1_idx] if lang1_idx < len(entry.lines) else ""
-            line2 = entry.lines[lang2_idx] if lang2_idx < len(entry.lines) else ""
-            self.setItem(row, 2, _item(line1))
-            self.setItem(row, 3, _item(line2))
-            missing = entry.index in empty_set
-            self.setItem(row, 4, _item(tr("@table.missing_lines") if missing else tr("@table.ok"), WARN_COLOR if missing else OK_COLOR))
-            self.setRowHeight(row, 48)
-        self._configure_columns()
+        visible_entries = entries[:PREVIEW_ROW_LIMIT]
+        self.total_entry_count = len(entries)
+        self.visible_entry_count = len(visible_entries)
+
+        self.setUpdatesEnabled(False)
+        try:
+            self.clear()
+            self.setColumnCount(5)
+            self.setHorizontalHeaderLabels([
+                tr("@table.index"),
+                tr("@table.timeline"),
+                line1_title or tr("@table.line1"),
+                line2_title or tr("@table.line2"),
+                tr("@table.status"),
+            ])
+            self.setRowCount(len(visible_entries))
+            empty_set = set(empty_entries)
+            for row, entry in enumerate(visible_entries):
+                timestamp = (
+                    f"{format_srt_timestamp(entry.start_time)}  →  "
+                    f"{format_srt_timestamp(entry.end_time)}"
+                )
+                self.setItem(row, 0, _item(str(entry.index), MUTED_COLOR))
+                self.setItem(row, 1, _item(timestamp, MUTED_COLOR))
+                line1 = entry.lines[lang1_idx] if lang1_idx < len(entry.lines) else ""
+                line2 = entry.lines[lang2_idx] if lang2_idx < len(entry.lines) else ""
+                self.setItem(row, 2, _item(line1))
+                self.setItem(row, 3, _item(line2))
+                missing = entry.index in empty_set
+                self.setItem(
+                    row,
+                    4,
+                    _item(
+                        tr("@table.missing_lines") if missing else tr("@table.ok"),
+                        WARN_COLOR if missing else OK_COLOR,
+                    ),
+                )
+                self.setRowHeight(row, 48)
+            self._configure_columns()
+        finally:
+            self.setUpdatesEnabled(True)
 
     def show_merge_preview(
         self,
@@ -74,35 +100,59 @@ class PreviewTable(QTableWidget):
     ) -> None:
         self._last_merge_args = (primary, secondary, conflicts)
         self._last_sep_args = None
-        self.clear()
-        self.setColumnCount(5)
-        self.setHorizontalHeaderLabels([
-            tr("@table.index"),
-            tr("@table.start_time"),
-            tr("@table.primary"),
-            tr("@table.secondary"),
-            tr("@table.status"),
-        ])
-        pmap = {entry.index: entry for entry in primary}
-        smap = {entry.index: entry for entry in secondary}
+        primary_map = {entry.index: entry for entry in primary}
+        secondary_map = {entry.index: entry for entry in secondary}
+        all_indices = sorted(set(primary_map) | set(secondary_map))
+        visible_indices = all_indices[:PREVIEW_ROW_LIMIT]
+        self.total_entry_count = len(all_indices)
+        self.visible_entry_count = len(visible_indices)
         conflict_map = {item[0]: item[2] for item in conflicts}
-        all_indices = sorted(set(pmap) | set(smap))
-        self.setRowCount(len(all_indices))
-        for row, idx in enumerate(all_indices):
-            p = pmap.get(idx)
-            s = smap.get(idx)
-            source = p or s
-            ts = format_srt_timestamp(source.start_time) if source else ""
-            self.setItem(row, 0, _item(str(idx), MUTED_COLOR))
-            self.setItem(row, 1, _item(ts, MUTED_COLOR))
-            self.setItem(row, 2, _item(p.lines[0] if p and p.lines else tr("@table.missing")))
-            self.setItem(row, 3, _item(s.lines[0] if s and s.lines else tr("@table.missing")))
-            if idx in conflict_map:
-                self.setItem(row, 4, _item(conflict_map[idx], WARN_COLOR))
-            else:
-                self.setItem(row, 4, _item(tr("@table.matched"), OK_COLOR))
-            self.setRowHeight(row, 48)
-        self._configure_columns()
+
+        self.setUpdatesEnabled(False)
+        try:
+            self.clear()
+            self.setColumnCount(5)
+            self.setHorizontalHeaderLabels([
+                tr("@table.index"),
+                tr("@table.start_time"),
+                tr("@table.primary"),
+                tr("@table.secondary"),
+                tr("@table.status"),
+            ])
+            self.setRowCount(len(visible_indices))
+            for row, index in enumerate(visible_indices):
+                primary_entry = primary_map.get(index)
+                secondary_entry = secondary_map.get(index)
+                source = primary_entry or secondary_entry
+                timestamp = format_srt_timestamp(source.start_time) if source else ""
+                self.setItem(row, 0, _item(str(index), MUTED_COLOR))
+                self.setItem(row, 1, _item(timestamp, MUTED_COLOR))
+                self.setItem(
+                    row,
+                    2,
+                    _item(
+                        primary_entry.lines[0]
+                        if primary_entry and primary_entry.lines
+                        else tr("@table.missing")
+                    ),
+                )
+                self.setItem(
+                    row,
+                    3,
+                    _item(
+                        secondary_entry.lines[0]
+                        if secondary_entry and secondary_entry.lines
+                        else tr("@table.missing")
+                    ),
+                )
+                if index in conflict_map:
+                    self.setItem(row, 4, _item(conflict_map[index], WARN_COLOR))
+                else:
+                    self.setItem(row, 4, _item(tr("@table.matched"), OK_COLOR))
+                self.setRowHeight(row, 48)
+            self._configure_columns()
+        finally:
+            self.setUpdatesEnabled(True)
 
     def _configure_columns(self) -> None:
         header = self.horizontalHeader()
@@ -118,6 +168,8 @@ class PreviewTable(QTableWidget):
     def clear_preview(self) -> None:
         self._last_sep_args = None
         self._last_merge_args = None
+        self.total_entry_count = 0
+        self.visible_entry_count = 0
         self.clear()
         self.setRowCount(0)
         self.setColumnCount(0)
