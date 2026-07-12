@@ -20,13 +20,20 @@ from PySide6.QtWidgets import (
 
 from gui.drop_zone import DropZone
 from gui.i18n import i18n, tr
+import gui.i18n_extra  # noqa: F401
 from gui.preview_table import PreviewTable
 from gui.ui_components import Card, FileSummary, PillGroup, SettingBox, StatusPill
 from logic.merger import merge
 from models.entry import SubtitleFile
 from models.enums import SubtitleFormat
 from parsers.base import detect_format, get_parser
-from utils.text import read_subtitle_file, strip_ass_tags, write_subtitle_file
+from utils.text import (
+    ensure_extension,
+    paths_equal,
+    read_subtitle_file,
+    strip_ass_tags,
+    write_subtitle_file,
+)
 
 
 class MergePanel(QWidget):
@@ -36,7 +43,12 @@ class MergePanel(QWidget):
         super().__init__()
         self.primary_file: SubtitleFile | None = None
         self.secondary_file: SubtitleFile | None = None
+        self.primary_encoding = "utf-8"
+        self.secondary_encoding = "utf-8"
+        self.primary_path = ""
+        self.secondary_path = ""
         self._last_result = None
+        self._output_path_custom = False
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -60,6 +72,7 @@ class MergePanel(QWidget):
         root.addWidget(right, 1)
 
         self.output_path.installEventFilter(self)
+        self.output_path.textEdited.connect(self._mark_output_custom)
         i18n.language_changed.connect(self._on_language_changed)
         self._on_language_changed(i18n.current_lang)
 
@@ -238,14 +251,19 @@ class MergePanel(QWidget):
         self.output_label.setText(tr("@merge.preview_output"))
         self.merge_btn.setText(tr("@merge.preview_start"))
         self._populate_format_combo()
-        self._refresh_preview_header()
+        if self.primary_file and self.secondary_file:
+            self._update_preview()
+        else:
+            self._refresh_preview_header()
 
     def _populate_format_combo(self) -> None:
-        previous = self.fmt_combo.currentText() if self.fmt_combo.count() else ""
+        previous_data = self.fmt_combo.currentData() if self.fmt_combo.count() else None
         self.fmt_combo.blockSignals(True)
         self.fmt_combo.clear()
-        self.fmt_combo.addItems([tr("@merge.same_as_primary"), "SRT", "ASS", "VTT"])
-        index = self.fmt_combo.findText(previous)
+        self.fmt_combo.addItem(tr("@merge.same_as_primary"), None)
+        for name in ("SRT", "ASS", "SSA", "VTT"):
+            self.fmt_combo.addItem(name, name)
+        index = self.fmt_combo.findData(previous_data)
         self.fmt_combo.setCurrentIndex(index if index >= 0 else 0)
         self.fmt_combo.blockSignals(False)
 
@@ -254,36 +272,46 @@ class MergePanel(QWidget):
         fmt = detect_format(text)
         parser = get_parser(fmt)
         subtitle = parser.parse(text)
+        if not subtitle.entries:
+            raise ValueError(tr("@error.no_entries"))
         subtitle._nl = newline
         return subtitle, fmt.name, encoding
 
     def _on_primary_loaded(self, path: str) -> None:
         try:
-            self.primary_file, fmt, encoding = self._load_subtitle(path)
-            self.primary_drop.set_loaded_metadata(
-                path,
-                fmt,
-                tr("@merge.preview_compact_meta", fmt=fmt, count=len(self.primary_file.entries)),
-            )
-            self._check_ready()
+            subtitle, fmt, encoding = self._load_subtitle(path)
         except Exception as exc:
-            self.primary_file = None
-            self.merge_btn.setEnabled(False)
+            self.primary_drop.restore_state()
             QMessageBox.warning(self, tr("@merge.preview_load_failed"), tr("@error.load", msg=str(exc)))
+            return
+
+        self.primary_file = subtitle
+        self.primary_path = path
+        self.primary_encoding = encoding
+        self.primary_drop.set_loaded_metadata(
+            path,
+            fmt,
+            tr("@merge.preview_compact_meta", fmt=fmt, count=len(subtitle.entries)),
+        )
+        self._check_ready()
 
     def _on_secondary_loaded(self, path: str) -> None:
         try:
-            self.secondary_file, fmt, encoding = self._load_subtitle(path)
-            self.secondary_drop.set_loaded_metadata(
-                path,
-                fmt,
-                tr("@merge.preview_compact_meta", fmt=fmt, count=len(self.secondary_file.entries)),
-            )
-            self._check_ready()
+            subtitle, fmt, encoding = self._load_subtitle(path)
         except Exception as exc:
-            self.secondary_file = None
-            self.merge_btn.setEnabled(False)
+            self.secondary_drop.restore_state()
             QMessageBox.warning(self, tr("@merge.preview_load_failed"), tr("@error.load", msg=str(exc)))
+            return
+
+        self.secondary_file = subtitle
+        self.secondary_path = path
+        self.secondary_encoding = encoding
+        self.secondary_drop.set_loaded_metadata(
+            path,
+            fmt,
+            tr("@merge.preview_compact_meta", fmt=fmt, count=len(subtitle.entries)),
+        )
+        self._check_ready()
 
     def _check_ready(self) -> None:
         ready = bool(self.primary_file and self.secondary_file)
@@ -293,8 +321,7 @@ class MergePanel(QWidget):
             self.preview_table.clear_preview()
             self._refresh_preview_header()
             return
-        if not self.output_path.text().strip():
-            self._update_default_output_path()
+        self._update_default_output_path()
         self._update_preview()
         self.status_message.emit(tr("@merge.preview_ready_status"))
 
@@ -326,7 +353,8 @@ class MergePanel(QWidget):
             result.conflicts,
         )
         total = max(len(self.primary_file.entries), len(self.secondary_file.entries), 1)
-        match_rate = max(0.0, (total - len(result.conflicts)) / total * 100)
+        conflict_indices = {item[0] for item in result.conflicts}
+        match_rate = max(0.0, (total - len(conflict_indices)) / total * 100)
         self.ready_summary.set_file(
             tr("@merge.preview_ready_title"),
             tr(
@@ -336,7 +364,7 @@ class MergePanel(QWidget):
                 rate=f"{match_rate:.1f}",
             ),
         )
-        self._refresh_preview_header(len(result.conflicts), match_rate)
+        self._refresh_preview_header(len(conflict_indices), match_rate)
 
     def _refresh_preview_header(self, conflicts: int = 0, rate: float = 0.0) -> None:
         if not self.primary_file or not self.secondary_file:
@@ -344,37 +372,52 @@ class MergePanel(QWidget):
             self.preview_status.setText(tr("@merge.preview_waiting"))
             self.preview_status.set_tone("neutral")
             return
+
         total = max(len(self.primary_file.entries), len(self.secondary_file.entries))
-        self.preview_meta.setText(tr("@merge.preview_meta", count=total, conflicts=conflicts))
+        meta = tr("@merge.preview_meta", count=total, conflicts=conflicts)
+        if self.preview_table.is_truncated:
+            meta += " · " + tr("@table.preview_limited_short", limit=self.preview_table.visible_entry_count)
+        self.preview_meta.setText(meta)
         self.preview_status.setText(tr("@merge.preview_rate", rate=f"{rate:.1f}"))
         self.preview_status.set_tone("warning" if conflicts else "success")
 
     def _resolve_output_format(self) -> SubtitleFormat:
         if not self.primary_file:
             return SubtitleFormat.SRT
-        choice = self.fmt_combo.currentText()
-        if choice == tr("@merge.same_as_primary") or choice == "Same as primary":
+        choice = self.fmt_combo.currentData()
+        if not choice:
             return self.primary_file.format
         try:
             return SubtitleFormat[choice]
         except KeyError:
             return self.primary_file.format
 
-    def _on_format_changed(self, _index: int) -> None:
-        self._update_default_output_path()
-
-    def _update_default_output_path(self) -> None:
-        if not self.primary_file or not self.primary_drop.file_path:
-            return
-        ext_map = {
+    def _output_extension(self) -> str:
+        return {
             SubtitleFormat.SRT: ".srt",
             SubtitleFormat.ASS: ".ass",
             SubtitleFormat.SSA: ".ssa",
             SubtitleFormat.VTT: ".vtt",
-        }
-        base, _ = os.path.splitext(self.primary_drop.file_path)
+        }.get(self._resolve_output_format(), ".srt")
+
+    def _on_format_changed(self, _index: int) -> None:
+        if self._output_path_custom and self.output_path.text().strip():
+            normalized = ensure_extension(self.output_path.text().strip(), self._output_extension())
+            self.output_path.blockSignals(True)
+            self.output_path.setText(normalized)
+            self.output_path.blockSignals(False)
+        else:
+            self._update_default_output_path()
+
+    def _mark_output_custom(self, _text: str) -> None:
+        self._output_path_custom = True
+
+    def _update_default_output_path(self) -> None:
+        if self._output_path_custom or not self.primary_file or not self.primary_path:
+            return
+        base, _ = os.path.splitext(self.primary_path)
         suffix = tr("@merge.preview_output_suffix")
-        self.output_path.setText(f"{base}_{suffix}{ext_map.get(self._resolve_output_format(), '.srt')}")
+        self.output_path.setText(f"{base}_{suffix}{self._output_extension()}")
 
     def eventFilter(self, watched, event) -> bool:
         if watched is self.output_path and event.type() == QEvent.MouseButtonDblClick:
@@ -390,37 +433,65 @@ class MergePanel(QWidget):
             tr("@drop.file_filter"),
         )
         if path:
-            self.output_path.setText(path)
+            self.output_path.setText(ensure_extension(path, self._output_extension()))
+            self._output_path_custom = True
+
+    def _validate_output_path(self, output_path: str) -> bool:
+        if not output_path:
+            QMessageBox.warning(self, tr("@merge.missing_path_title"), tr("@merge.missing_path_msg"))
+            return False
+        if paths_equal(output_path, self.primary_path) or paths_equal(output_path, self.secondary_path):
+            QMessageBox.warning(self, tr("@error.output_path_title"), tr("@error.output_overwrites_source"))
+            return False
+        return True
 
     def _on_merge(self) -> None:
         if not self.primary_file or not self.secondary_file:
             return
-        output_path = self.output_path.text().strip()
-        if not output_path:
-            QMessageBox.warning(self, tr("@merge.missing_path_title"), tr("@merge.missing_path_msg"))
+
+        output_path = ensure_extension(self.output_path.text().strip(), self._output_extension())
+        if not self._validate_output_path(output_path):
             return
-        result = merge(
-            self.primary_file,
-            self.secondary_file,
-            timestamp_source=self.ts_group.value() or "primary",
-            ordering=self.order_group.value() or "primary_first",
-            on_entry_count_mismatch=self.mismatch_group.value() or "warn_pad",
-            timestamp_tolerance_ms=self._selected_tolerance(),
-            header_source=self.header_group.value() or "primary",
-        )
-        out_fmt = self._resolve_output_format()
-        result.merged_file.format = out_fmt
-        if out_fmt not in (SubtitleFormat.ASS, SubtitleFormat.SSA):
-            for entry in result.merged_file.entries:
-                entry.lines = [strip_ass_tags(line) for line in entry.lines]
-        parser = get_parser(out_fmt)
-        newline = getattr(self.primary_file, "_nl", "\r\n")
-        write_subtitle_file(output_path, parser.write(result.merged_file), newline=newline)
+        self.output_path.setText(output_path)
+
+        try:
+            result = merge(
+                self.primary_file,
+                self.secondary_file,
+                timestamp_source=self.ts_group.value() or "primary",
+                ordering=self.order_group.value() or "primary_first",
+                on_entry_count_mismatch=self.mismatch_group.value() or "warn_pad",
+                timestamp_tolerance_ms=self._selected_tolerance(),
+                header_source=self.header_group.value() or "primary",
+            )
+            out_fmt = self._resolve_output_format()
+            result.merged_file.format = out_fmt
+            if out_fmt not in (SubtitleFormat.ASS, SubtitleFormat.SSA):
+                for entry in result.merged_file.entries:
+                    entry.lines = [strip_ass_tags(line) for line in entry.lines]
+            parser = get_parser(out_fmt)
+            newline = getattr(self.primary_file, "_nl", "\r\n")
+            write_subtitle_file(
+                output_path,
+                parser.write(result.merged_file),
+                encoding=self.primary_encoding,
+                newline=newline,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, tr("@error.write_title"), tr("@error.write_failed", msg=str(exc)))
+            self.status_message.emit(tr("@error.write_failed", msg=str(exc)))
+            return
+
         message = tr("@merge.complete_msg", path=output_path)
         if result.conflicts:
             message += "\n\n" + tr("@merge.warnings", n=len(result.conflicts))
             for idx, conflict_type, detail in result.conflicts[:5]:
-                message += tr("@merge.conflict_entry", idx=idx, ctype=conflict_type.name, detail=detail)
+                message += tr(
+                    "@merge.conflict_entry",
+                    idx=idx,
+                    ctype=conflict_type.name,
+                    detail=detail,
+                )
             if len(result.conflicts) > 5:
                 message += tr("@merge.conflict_more", n=len(result.conflicts) - 5)
         QMessageBox.information(self, tr("@merge.complete_title"), message)
