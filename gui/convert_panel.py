@@ -20,11 +20,12 @@ from PySide6.QtWidgets import (
 
 from gui.drop_zone import DropZone
 from gui.i18n import i18n, tr
+import gui.i18n_extra  # noqa: F401
 from gui.ui_components import Card, StatusPill
-from logic.converter import convert_subtitle
+from logic.converter import convert_subtitle, resolved_conversion_output_path
 from models.enums import SubtitleFormat
 from parsers.base import detect_format, get_parser
-from utils.text import read_subtitle_file
+from utils.text import paths_equal, read_subtitle_file
 
 
 class FormatConvertPanel(QWidget):
@@ -226,79 +227,87 @@ class FormatConvertPanel(QWidget):
         self._refresh_state()
 
     def _on_file_loaded(self, path: str) -> None:
+        try:
+            raw_text, encoding, _newline = read_subtitle_file(path)
+            source_format = detect_format(raw_text)
+            parser = get_parser(source_format)
+            subtitle = parser.parse(raw_text)
+            if not subtitle.entries:
+                raise ValueError(tr("@error.no_entries"))
+        except Exception as exc:
+            self.drop_zone.restore_state()
+            QMessageBox.warning(self, tr("@convert.preview_load_failed"), tr("@error.load", msg=str(exc)))
+            return
+
         self._source_path = path
+        self._source_format = source_format
+        self._entry_count = len(subtitle.entries)
         self._custom_output_path = ""
         self._last_output_path = ""
         self.open_folder_btn.setEnabled(False)
-        try:
-            raw_text, encoding, _newline = read_subtitle_file(path)
-            self._source_format = detect_format(raw_text)
-            parser = get_parser(self._source_format)
-            subtitle = parser.parse(raw_text)
-            self._entry_count = len(subtitle.entries)
-            self.drop_zone.set_loaded_metadata(
-                path,
-                self._source_format.name,
-                tr(
-                    "@convert.preview_loaded_meta",
-                    fmt=self._source_format.name,
-                    count=self._entry_count,
-                    encoding=encoding.upper(),
-                ),
-            )
-            self.convert_btn.setEnabled(True)
-            self._update_output_path()
-            self._refresh_state()
-            self.status_message.emit(tr("@convert.status.detected", fmt=self._source_format.name, count=self._entry_count))
-        except Exception as exc:
-            self._source_format = None
-            self._entry_count = 0
-            self.convert_btn.setEnabled(False)
-            self.ready_pill.setText(tr("@convert.preview_failed"))
-            self.ready_pill.set_tone("danger")
-            QMessageBox.warning(self, tr("@convert.preview_load_failed"), tr("@error.load", msg=str(exc)))
+        self.drop_zone.set_loaded_metadata(
+            path,
+            source_format.name,
+            tr(
+                "@convert.preview_loaded_meta",
+                fmt=source_format.name,
+                count=self._entry_count,
+                encoding=encoding.upper(),
+            ),
+        )
+        self.convert_btn.setEnabled(True)
+        self._update_output_path()
+        self._refresh_state()
+        self.status_message.emit(
+            tr("@convert.status.detected", fmt=source_format.name, count=self._entry_count)
+        )
+
+    def _target_format(self) -> SubtitleFormat:
+        return SubtitleFormat[self.format_combo.currentText()]
 
     def _on_target_format_changed(self, _index: int) -> None:
         self.target_tag.setText(self.format_combo.currentText())
+        if self._custom_output_path:
+            self._custom_output_path = resolved_conversion_output_path(
+                self._custom_output_path,
+                self._target_format(),
+            )
         self._update_output_path()
         self._refresh_state()
 
-    def _update_output_path(self) -> None:
+    def _default_output_path(self) -> str:
         if not self._source_path:
+            return ""
+        source = Path(self._source_path)
+        base = str(source.parent / f"{source.stem}_converted")
+        return resolved_conversion_output_path(base, self._target_format())
+
+    def _resolved_output_path(self) -> str:
+        candidate = self._custom_output_path or self._default_output_path()
+        if not candidate:
+            return ""
+        return resolved_conversion_output_path(candidate, self._target_format())
+
+    def _update_output_path(self) -> None:
+        output_path = self._resolved_output_path()
+        if not output_path:
             self.output_name_label.setText(tr("@convert.preview_no_output"))
+            self.output_name_label.setToolTip("")
             return
-        if self._custom_output_path:
-            output_path = self._custom_output_path
-        else:
-            src = Path(self._source_path)
-            ext_map = {"SRT": ".srt", "ASS": ".ass", "SSA": ".ssa", "VTT": ".vtt"}
-            ext = ext_map.get(self.format_combo.currentText(), ".srt")
-            output_path = str(src.parent / f"{src.stem}_converted{ext}")
         self.output_name_label.setText(os.path.basename(output_path))
         self.output_name_label.setToolTip(output_path)
 
-    def _resolved_output_path(self) -> str:
-        if self._custom_output_path:
-            return self._custom_output_path
-        if not self._source_path:
-            return ""
-        src = Path(self._source_path)
-        ext_map = {"SRT": ".srt", "ASS": ".ass", "SSA": ".ssa", "VTT": ".vtt"}
-        ext = ext_map.get(self.format_combo.currentText(), ".srt")
-        return str(src.parent / f"{src.stem}_converted{ext}")
-
     def _browse_output(self) -> None:
         target = self.format_combo.currentText()
-        ext_map = {"SRT": ".srt", "ASS": ".ass", "SSA": ".ssa", "VTT": ".vtt"}
-        ext = ext_map.get(target, ".srt")
+        extension = {"SRT": ".srt", "ASS": ".ass", "SSA": ".ssa", "VTT": ".vtt"}.get(target, ".srt")
         path, _ = QFileDialog.getSaveFileName(
             self,
             tr("@convert.choose_output"),
             self._resolved_output_path(),
-            f"{target} Files (*{ext});;All Files (*.*)",
+            f"{target} Files (*{extension});;All Files (*.*)",
         )
         if path:
-            self._custom_output_path = path
+            self._custom_output_path = resolved_conversion_output_path(path, self._target_format())
             self._update_output_path()
             self._refresh_state()
 
@@ -311,36 +320,54 @@ class FormatConvertPanel(QWidget):
             self.ready_pill.setText(tr("@convert.preview_waiting"))
             self.ready_pill.set_tone("neutral")
             return
+
         self.source_tag.setText(self._source_format.name)
         self.source_value.setText(
             tr("@convert.preview_source_value", fmt=self._source_format.name, count=self._entry_count)
         )
         self._update_output_path()
-        self.ready_pill.setText(tr("@convert.preview_ready"))
-        self.ready_pill.set_tone("success")
+        if paths_equal(self._source_path, self._resolved_output_path()):
+            self.ready_pill.setText(tr("@convert.preview_path_conflict"))
+            self.ready_pill.set_tone("danger")
+        else:
+            self.ready_pill.setText(tr("@convert.preview_ready"))
+            self.ready_pill.set_tone("success")
 
     def _on_convert(self) -> None:
         if not self._source_path or not self._source_format:
             return
+
         output_path = self._resolved_output_path()
-        target_format = SubtitleFormat[self.format_combo.currentText()]
+        if paths_equal(self._source_path, output_path):
+            QMessageBox.warning(self, tr("@error.output_path_title"), tr("@error.output_overwrites_source"))
+            return
+
         self.convert_btn.setEnabled(False)
         self.ready_pill.setText(tr("@convert.status.converting"))
         self.ready_pill.set_tone("warning")
         try:
-            result = convert_subtitle(self._source_path, output_path, target_format)
+            result = convert_subtitle(self._source_path, output_path, self._target_format())
             self._last_output_path = output_path
             self.open_folder_btn.setEnabled(True)
-            self.convert_btn.setEnabled(True)
             self.ready_pill.setText(tr("@convert.preview_complete"))
             self.ready_pill.set_tone("success")
             self.status_message.emit(result)
-            QMessageBox.information(self, tr("@convert.output_title"), tr("@convert.output_msg", path=output_path))
+            QMessageBox.information(
+                self,
+                tr("@convert.output_title"),
+                tr("@convert.output_msg", path=output_path),
+            )
         except Exception as exc:
-            self.convert_btn.setEnabled(True)
             self.ready_pill.setText(tr("@convert.preview_failed"))
             self.ready_pill.set_tone("danger")
-            QMessageBox.warning(self, tr("@convert.preview_failed"), tr("@convert.status.failed", msg=str(exc)))
+            QMessageBox.warning(
+                self,
+                tr("@convert.preview_failed"),
+                tr("@convert.status.failed", msg=str(exc)),
+            )
+            self.status_message.emit(tr("@convert.status.failed", msg=str(exc)))
+        finally:
+            self.convert_btn.setEnabled(True)
 
     def _on_clear(self) -> None:
         self._source_path = ""
@@ -360,10 +387,14 @@ class FormatConvertPanel(QWidget):
         folder = os.path.dirname(os.path.abspath(self._last_output_path))
         try:
             if os.name == "nt":
-                subprocess.Popen(["explorer", folder])
+                os.startfile(folder)
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", folder])
             else:
                 subprocess.Popen(["xdg-open", folder])
-        except Exception:
-            pass
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                tr("@convert.open_output_folder"),
+                tr("@error.open_folder_failed", msg=str(exc)),
+            )
